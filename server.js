@@ -8,50 +8,104 @@ app.get("/", (req, res) => {
     res.send("RoAPI unified backend is online!");
 });
 
-app.get("/:type/:id", async (req, res) => {
+// helper: check if value is numeric ID
+const isId = (value) => /^\d+$/.test(value);
+
+app.get("/:type/:value", async (req, res) => {
     try {
-        const { type, id } = req.params;
+        const { type, value } = req.params;
 
         let response;
 
-        // 👤 USER
+        // 👤 USER (ID or USERNAME)
         if (type === "user" || type === "player") {
-            response = await axios.get(
-                `https://users.roblox.com/v1/users/${id}`
-            );
-        }
 
-        // 📦 ASSET
-        else if (type === "asset") {
-            response = await axios.get(
-                `https://economy.roblox.com/v2/assets/${id}/details`
-            );
-        }
-
-        // 🎮 EXPERIENCE / GAME
-        else if (type === "experience" || type === "game") {
-            const placeId = id;
-            let universeId = null;
-
-            try {
-                const universeRes = await axios.get(
-                    `https://apis.roblox.com/universes/v1/places/${placeId}/universe`
+            if (isId(value)) {
+                // user by ID
+                response = await axios.get(
+                    `https://users.roblox.com/v1/users/${value}`
                 );
-                universeId = universeRes.data?.universeId;
-            } catch (e) {}
+            } else {
+                // username → userId lookup
+                const lookup = await axios.post(
+                    `https://users.roblox.com/v1/usernames/users`,
+                    {
+                        usernames: [value],
+                        excludeBannedUsers: false
+                    }
+                );
 
-            const finalUniverseId = universeId || id;
+                const userId = lookup.data?.data?.[0]?.id;
 
-            response = await axios.get(
-                `https://games.roblox.com/v1/games?universeIds=${finalUniverseId}`
-            );
+                if (!userId) {
+                    return res.json({
+                        success: false,
+                        error: "User not found"
+                    });
+                }
+
+                response = await axios.get(
+                    `https://users.roblox.com/v1/users/${userId}`
+                );
+            }
         }
 
-        // 👥 GROUP
+        // 📦 ASSET (ID or NAME)
+        else if (type === "asset") {
+
+            if (isId(value)) {
+                response = await axios.get(
+                    `https://economy.roblox.com/v2/assets/${value}/details`
+                );
+            } else {
+                // search asset by name (catalog search)
+                response = await axios.get(
+                    `https://catalog.roblox.com/v1/search/items/details?Category=All&Keyword=${encodeURIComponent(value)}`
+                );
+            }
+        }
+
+        // 🎮 GAME / EXPERIENCE (ID or NAME)
+        else if (type === "experience" || type === "game") {
+
+            if (isId(value)) {
+
+                // treat as placeId/universeId
+                let universeId = null;
+
+                try {
+                    const universeRes = await axios.get(
+                        `https://apis.roblox.com/universes/v1/places/${value}/universe`
+                    );
+                    universeId = universeRes.data?.universeId;
+                } catch (e) {}
+
+                const finalUniverseId = universeId || value;
+
+                response = await axios.get(
+                    `https://games.roblox.com/v1/games?universeIds=${finalUniverseId}`
+                );
+
+            } else {
+                // game name search
+                response = await axios.get(
+                    `https://games.roblox.com/v1/games/list?keyword=${encodeURIComponent(value)}`
+                );
+            }
+        }
+
+        // 👥 GROUP (ID or NAME)
         else if (type === "group") {
-            response = await axios.get(
-                `https://groups.roblox.com/v1/groups/${id}`
-            );
+
+            if (isId(value)) {
+                response = await axios.get(
+                    `https://groups.roblox.com/v1/groups/${value}`
+                );
+            } else {
+                response = await axios.get(
+                    `https://groups.roblox.com/v1/groups/search?keyword=${encodeURIComponent(value)}`
+                );
+            }
         }
 
         else {
@@ -65,7 +119,7 @@ app.get("/:type/:id", async (req, res) => {
         return res.json({
             success: true,
             type,
-            id,
+            value,
             data: response.data
         });
 
