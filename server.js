@@ -8,7 +8,7 @@ app.get("/", (req, res) => {
     res.send("RoAPI unified backend is online!");
 });
 
-app.get("/roblox/:type/:id", async (req, res) => {
+app.get("/:type/:id", async (req, res) => {
     try {
         const { type, id } = req.params;
 
@@ -28,12 +28,9 @@ app.get("/roblox/:type/:id", async (req, res) => {
             );
         }
 
-        // 🎮 EXPERIENCE (SMART HANDLING)
+        // 🎮 EXPERIENCE / GAME
         else if (type === "experience" || type === "game") {
-
-            // STEP 1: assume ID is a placeId
             const placeId = id;
-
             let universeId = null;
 
             try {
@@ -41,11 +38,8 @@ app.get("/roblox/:type/:id", async (req, res) => {
                     `https://apis.roblox.com/universes/v1/places/${placeId}/universe`
                 );
                 universeId = universeRes.data?.universeId;
-            } catch (e) {
-                // ignore, might already be universeId
-            }
+            } catch (e) {}
 
-            // STEP 2: fallback → treat as universeId if place lookup fails
             const finalUniverseId = universeId || id;
 
             response = await axios.get(
@@ -53,7 +47,7 @@ app.get("/roblox/:type/:id", async (req, res) => {
             );
         }
 
-        // 👥 GROUP (optional but useful)
+        // 👥 GROUP
         else if (type === "group") {
             response = await axios.get(
                 `https://groups.roblox.com/v1/groups/${id}`
