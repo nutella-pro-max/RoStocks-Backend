@@ -5,64 +5,78 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => {
-    res.send("RoStocks backend is online!");
+    res.send("RoAPI unified backend is online!");
 });
 
-app.get("/game/:placeId", async (req, res) => {
+app.get("/roblox/:type/:id", async (req, res) => {
     try {
-        const placeId = req.params.placeId;
+        const { type, id } = req.params;
 
-        // STEP 1: placeId → universeId (CORRECT ENDPOINT)
-        const universeResponse = await axios.get(
-            `https://apis.roblox.com/universes/v1/places/${placeId}/universe`
-        );
+        let response;
 
-        const universeId = universeResponse.data?.universeId;
-
-        if (!universeId) {
-            return res.json({
-                success: false,
-                error: "UniverseId not found for this placeId"
-            });
+        // 👤 USER
+        if (type === "user" || type === "player") {
+            response = await axios.get(
+                `https://users.roblox.com/v1/users/${id}`
+            );
         }
 
-        // STEP 2: universeId → game data
-        const gameResponse = await axios.get(
-            `https://games.roblox.com/v1/games?universeIds=${universeId}`
-        );
-
-        const game = gameResponse.data?.data?.[0];
-
-        if (!game) {
-            return res.json({
-                success: false,
-                error: "Game data not found"
-            });
+        // 📦 ASSET
+        else if (type === "asset") {
+            response = await axios.get(
+                `https://economy.roblox.com/v2/assets/${id}/details`
+            );
         }
 
-        res.json({
-            success: true,
-            game: {
-                id: game.id,
-                placeId: game.rootPlaceId,
-                name: game.name,
+        // 🎮 EXPERIENCE (SMART HANDLING)
+        else if (type === "experience" || type === "game") {
 
-                creatorIsGroup: game.creator.type == "Group",
-                creatorId: game.creator.id,
-                creatorName: game.creator.name,
+            // STEP 1: assume ID is a placeId
+            const placeId = id;
 
-                playing: game.playing,
-                visits: game.visits,
-                created: game.created,
-                updated: game.updated,
-                favorites: game.favoritedCount
+            let universeId = null;
+
+            try {
+                const universeRes = await axios.get(
+                    `https://apis.roblox.com/universes/v1/places/${placeId}/universe`
+                );
+                universeId = universeRes.data?.universeId;
+            } catch (e) {
+                // ignore, might already be universeId
             }
+
+            // STEP 2: fallback → treat as universeId if place lookup fails
+            const finalUniverseId = universeId || id;
+
+            response = await axios.get(
+                `https://games.roblox.com/v1/games?universeIds=${finalUniverseId}`
+            );
+        }
+
+        // 👥 GROUP (optional but useful)
+        else if (type === "group") {
+            response = await axios.get(
+                `https://groups.roblox.com/v1/groups/${id}`
+            );
+        }
+
+        else {
+            return res.json({
+                success: false,
+                error: "Unsupported type",
+                supportedTypes: ["user", "asset", "experience", "game", "group"]
+            });
+        }
+
+        return res.json({
+            success: true,
+            type,
+            id,
+            data: response.data
         });
 
     } catch (err) {
-        console.error("ERROR:", err.response?.data || err.message);
-
-        res.json({
+        return res.json({
             success: false,
             error: "Failed to fetch Roblox data",
             details: err.response?.data || err.message
