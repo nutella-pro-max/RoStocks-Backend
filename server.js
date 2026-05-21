@@ -1,4 +1,4 @@
-    const express = require("express");
+        const express = require("express");
 const axios = require("axios");
 const { createClient } = require("@supabase/supabase-js");
 
@@ -218,6 +218,34 @@ async function cleanupOldHistory() {
         console.log(
             "Old stock history deleted"
         );
+    }
+}
+
+function randomBetween(min, max) {
+    return Math.random() * (max - min) + min;
+}
+
+// small natural drift updater
+function updateAllStocksAlive(volatilityPercent = 0.5) {
+    for (const stock in STOCKS) {
+
+        const current = STOCKS[stock].price;
+        const momentum = (Math.random() - 0.5) * 0.2; // slight bias
+
+        const changePercent = randomBetween(
+            -volatilityPercent,
+            volatilityPercent
+        ) + momentum;
+
+        const change = current * (changePercent / 100);
+
+        let newPrice = current + change;
+
+        // safety clamps
+        newPrice = Math.max(1, newPrice);
+        newPrice = Number(newPrice.toFixed(2));
+
+        STOCKS[stock].price = newPrice;
     }
 }
 
@@ -804,8 +832,16 @@ async function compressStockHistory() {
     }
 }
 
-setInterval(cleanupOldHistory, 24 * 60 * 60 * 1000);
-setInterval(compressStockHistory, 24 * 60 * 60 * 1000);
+const MARKET_TICK_MINUTES = 5;
+const VOLATILITY = 0.5; // percent per tick
+
+setInterval(() => {
+    updateAllStocksAlive(VOLATILITY);
+    console.log("Market tick: stocks updated");
+}, MARKET_TICK_MINUTES * 60 * 1000);
+
+setInterval(cleanupOldHistory, 6 * 60 * 60 * 1000);
+setInterval(compressStockHistory, 6 * 60 * 60 * 1000);
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
