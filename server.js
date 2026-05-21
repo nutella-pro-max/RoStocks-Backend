@@ -8,10 +8,14 @@ app.get("/", (req, res) => {
     res.send("RoAPI unified backend is online!");
 });
 
-// helper: check if string is numeric ID
+// =========================================================
+// HELPERS
+// =========================================================
+
+// check if numeric ID
 const isId = (value) => /^\d+$/.test(value);
 
-// helper: get friend/follower counts
+// friend/follower counts
 async function getUserCounts(userId) {
 
     const [friends, followers, following] = await Promise.all([
@@ -36,6 +40,90 @@ async function getUserCounts(userId) {
         following: following.data.count
     };
 }
+
+// get ALL collectibles
+async function getAllCollectibles(userId) {
+
+    let cursor = null;
+    let collectibles = [];
+
+    while (true) {
+
+        const res = await axios.get(
+            `https://inventory.roblox.com/v1/users/${userId}/assets/collectibles`,
+            {
+                params: {
+                    limit: 100,
+                    sortOrder: "Asc",
+                    cursor
+                }
+            }
+        );
+
+        collectibles.push(...(res.data.data || []));
+
+        if (!res.data.nextPageCursor) break;
+
+        cursor = res.data.nextPageCursor;
+    }
+
+    return collectibles;
+}
+
+// calculate total account value
+async function getAccountValue(userId) {
+
+    try {
+
+        // get collectibles
+        const collectibles = await getAllCollectibles(userId);
+
+        // Rolimons values
+        const rolimonsRes = await axios.get(
+            "https://www.rolimons.com/itemapi/itemdetails"
+        );
+
+        const itemData = rolimonsRes.data.items;
+
+        let totalRAP = 0;
+        let totalValue = 0;
+
+        for (const item of collectibles) {
+
+            const details = itemData[item.assetId];
+
+            if (!details) continue;
+
+            // Rolimons format:
+            // [name, acronym, rap, value, ...]
+
+            const rap = details[2] || 0;
+            const value = details[3] || rap;
+
+            totalRAP += rap;
+            totalValue += value;
+        }
+
+        return {
+            collectibleCount: collectibles.length,
+            totalRAP,
+            totalValue
+        };
+
+    } catch (err) {
+
+        return {
+            collectibleCount: 0,
+            totalRAP: 0,
+            totalValue: 0,
+            error: "Inventory may be private"
+        };
+    }
+}
+
+// =========================================================
+// MAIN ROUTE
+// =========================================================
 
 app.get("/:type/:value", async (req, res) => {
 
@@ -87,11 +175,16 @@ app.get("/:type/:value", async (req, res) => {
                 `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=420x420&format=Png&isCircular=false`
             );
 
+            // account value
+            const accountValue = await getAccountValue(userId);
+
             response = {
                 data: {
                     ...userRes.data,
 
                     counts,
+
+                    accountValue,
 
                     thumbnail:
                         thumbnailRes.data?.data?.[0]?.imageUrl || null
@@ -129,7 +222,7 @@ app.get("/:type/:value", async (req, res) => {
 
                 let universeId = null;
 
-                // try placeId → universeId
+                // placeId → universeId
                 try {
 
                     const universeRes = await axios.get(
