@@ -1,12 +1,19 @@
-const express = require("express");
+    const express = require("express");
 const axios = require("axios");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+app.use(express.json());
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_KEY
+);
 
 app.get("/", (req, res) => {
     res.send("RoAPI unified backend is online!");
 });
+const STOCKS = {};
 
 // =========================================================
 // HELPERS
@@ -121,9 +128,295 @@ async function getAccountValue(userId) {
     }
 }
 
+// calculate new stock price
+function calculateNewPrice(oldPrice, shares, type, followers, accountValue, accountAgeDays) {
+    /*
+    =========================================================
+    REPUTATION SCORE
+    =========================================================
+    */
+
+    const followerScore =
+        Math.log10(followers + 1) * 1.5;
+
+    const valueScore =
+        Math.log10(accountValue + 1) * 2;
+
+    const ageScore =
+        Math.log10(accountAgeDays + 1) * 1.2;
+
+    /*
+    =========================================================
+    BASE VALUE
+    =========================================================
+    */
+
+    const reputationValue =
+        10 +
+        followerScore +
+        valueScore +
+        ageScore;
+
+    /*
+    =========================================================
+    MARKET MOVEMENT
+    =========================================================
+    */
+
+    const marketForce = shares * 0.02;
+
+    let newPrice = oldPrice;
+
+    if (type === "BUY") {
+        newPrice += marketForce;
+    }
+
+    if (type === "SELL") {
+        newPrice -= marketForce;
+    }
+
+    /*
+    =========================================================
+    BLEND MARKET + REPUTATION
+    =========================================================
+    */
+
+    newPrice =
+        (newPrice * 0.8) +
+        (reputationValue * 0.2);
+
+    /*
+    =========================================================
+    SAFETY
+    =========================================================
+    */
+
+    newPrice = Math.max(1, newPrice);
+
+    return Number(newPrice.toFixed(2));
+}
+
+async function cleanupOldHistory() {
+
+    const oneMonthAgo =
+        Date.now() - (7 * 24 * 60 * 60 * 1000);
+
+    const { error } = await supabase
+        .from("stock_history")
+        .delete()
+        .lt("timestamp", oneMonthAgo);
+
+    if (error) {
+
+        console.error(
+            "Cleanup failed:",
+            error.message
+        );
+
+    } else {
+
+        console.log(
+            "Old stock history deleted"
+        );
+    }
+}
+
 // =========================================================
 // MAIN ROUTE
 // =========================================================
+app.get("/history/:stock", async (req, res) => {
+
+    try {
+
+        const stock = req.params.stock;
+
+        const { data, error } = await supabase
+            .from("stock_history")
+            .select("*")
+            .eq("stock", stock)
+            .order("timestamp", {
+                ascending: true
+            });
+
+        if (error) {
+
+            return res.json({
+                success: false,
+                error: error.message
+            });
+        }
+
+        return res.json({
+            success: true,
+            history: data
+        });
+
+    } catch (err) {
+
+        return res.json({
+            success: false,
+            error: err.message
+        });
+    }
+});
+
+app.get("/stock/:stock", async (req, res) => {
+
+    try {
+
+        const stock = req.params.stock;
+
+        if (!STOCKS[stock]) {
+
+            return res.json({
+                success: false,
+                error: "Stock not found"
+            });
+        }
+
+        return res.json({
+            success: true,
+            stock,
+            price: STOCKS[stock].price
+        });
+
+    } catch (err) {
+
+        return res.json({
+            success: false,
+            error: err.message
+        });
+    }
+});
+
+app.post("/trade", async (req, res) => {
+
+    try {
+
+        const {
+            stock,
+            shares,
+            type,
+            followers,
+            accountValue,
+            accountAgeDays
+        } = req.body;
+
+        /*
+        =========================================================
+        VALIDATION
+        =========================================================
+        */
+
+        if (!stock || typeof stock !== "string") {
+
+            return res.json({
+                success: false,
+                error: "Invalid stock"
+            });
+        }
+
+        if (
+            typeof shares !== "number" ||
+            shares <= 0
+        ) {
+
+            return res.json({
+                success: false,
+                error: "Invalid shares"
+            });
+        }
+
+        if (
+            type !== "BUY" &&
+            type !== "SELL"
+        ) {
+
+            return res.json({
+                success: false,
+                error: "Invalid type"
+            });
+        }
+
+        /*
+        =========================================================
+        CREATE STOCK
+        =========================================================
+        */
+
+        if (!STOCKS[stock]) {
+
+            STOCKS[stock] = {
+                price: 10,
+                lastSaved: 0
+            };
+        }
+
+        /*
+        =========================================================
+        CALCULATE PRICE
+        =========================================================
+        */
+
+        const oldPrice = STOCKS[stock].price;
+
+        const newPrice = calculateNewPrice(
+            oldPrice,
+            shares,
+            type,
+            followers || 0,
+            accountValue || 0,
+            accountAgeDays || 0
+        );
+
+        STOCKS[stock].price = newPrice;
+
+        /*
+        =========================================================
+        SAVE SNAPSHOT EVERY 10 MINUTES
+        =========================================================
+        */
+
+        const now = Date.now();
+
+        const TEN_MINUTES = 10 * 60 * 1000;
+
+        if (
+            now - STOCKS[stock].lastSaved >= TEN_MINUTES
+        ) {
+
+            STOCKS[stock].lastSaved = now;
+
+            await supabase
+                .from("stock_history")
+                .insert({
+                    stock,
+                    price: newPrice,
+                    timestamp: now
+                });
+        }
+
+        /*
+        =========================================================
+        RESPONSE
+        =========================================================
+        */
+
+        return res.json({
+            success: true,
+            stock,
+            oldPrice,
+            newPrice
+        });
+
+    } catch (err) {
+
+        return res.json({
+            success: false,
+            error: err.message
+        });
+    }
+});
 
 app.get("/:type/:value", async (req, res) => {
 
@@ -308,6 +601,211 @@ app.get("/:type/:value", async (req, res) => {
         });
     }
 });
+
+async function compressStockHistory() {
+
+    try {
+
+        const now = Date.now();
+
+        const THREE_HOURS =
+            3 * 60 * 60 * 1000;
+
+        const ONE_DAY =
+            24 * 60 * 60 * 1000;
+
+        const ONE_WEEK =
+            7 * 24 * 60 * 60 * 1000;
+
+        const ONE_MONTH =
+            30 * 24 * 60 * 60 * 1000;
+
+        /*
+        =========================================================
+        GET ALL HISTORY
+        =========================================================
+        */
+
+        const { data, error } = await supabase
+            .from("stock_history")
+            .select("*")
+            .order("timestamp", {
+                ascending: true
+            });
+
+        if (error) {
+
+            console.error(error);
+
+            return;
+        }
+
+        /*
+        =========================================================
+        GROUP BY STOCK
+        =========================================================
+        */
+
+        const grouped = {};
+
+        for (const row of data) {
+
+            if (!grouped[row.stock]) {
+                grouped[row.stock] = [];
+            }
+
+            grouped[row.stock].push(row);
+        }
+
+        /*
+        =========================================================
+        PROCESS EACH STOCK
+        =========================================================
+        */
+
+        for (const stock in grouped) {
+
+            const snapshots = grouped[stock];
+
+            let lastHourSnapshot = 0;
+            let last12HourSnapshot = 0;
+            let last2DaySnapshot = 0;
+
+            const idsToDelete = [];
+
+            for (const snapshot of snapshots) {
+
+                const age =
+                    now - snapshot.timestamp;
+
+                /*
+                =========================================================
+                OLDER THAN MONTH -> DELETE
+                =========================================================
+                */
+
+                if (age > ONE_MONTH) {
+
+                    idsToDelete.push(snapshot.id);
+
+                    continue;
+                }
+
+                /*
+                =========================================================
+                LAST 3 HOURS
+                KEEP EVERYTHING
+                =========================================================
+                */
+
+                if (age <= THREE_HOURS) {
+                    continue;
+                }
+
+                /*
+                =========================================================
+                LAST DAY
+                KEEP 1 HOUR APART
+                =========================================================
+                */
+
+                if (age <= ONE_DAY) {
+
+                    if (
+                        snapshot.timestamp -
+                        lastHourSnapshot <
+                        ONE_HOUR
+                    ) {
+
+                        idsToDelete.push(snapshot.id);
+
+                    } else {
+
+                        lastHourSnapshot =
+                            snapshot.timestamp;
+                    }
+
+                    continue;
+                }
+
+                /*
+                =========================================================
+                LAST WEEK
+                KEEP 12 HOURS APART
+                =========================================================
+                */
+
+                if (age <= ONE_WEEK) {
+
+                    if (
+                        snapshot.timestamp -
+                        last12HourSnapshot <
+                        12 * 60 * 60 * 1000
+                    ) {
+
+                        idsToDelete.push(snapshot.id);
+
+                    } else {
+
+                        last12HourSnapshot =
+                            snapshot.timestamp;
+                    }
+
+                    continue;
+                }
+
+                /*
+                =========================================================
+                LAST MONTH
+                KEEP 2 DAYS APART
+                =========================================================
+                */
+
+                if (
+                    snapshot.timestamp -
+                    last2DaySnapshot <
+                    2 * ONE_DAY
+                ) {
+
+                    idsToDelete.push(snapshot.id);
+
+                } else {
+
+                    last2DaySnapshot =
+                        snapshot.timestamp;
+                }
+            }
+
+            /*
+            =========================================================
+            DELETE COMPRESSED SNAPSHOTS
+            =========================================================
+            */
+
+            if (idsToDelete.length > 0) {
+
+                await supabase
+                    .from("stock_history")
+                    .delete()
+                    .in("id", idsToDelete);
+
+                console.log(
+                    `Compressed ${stock}: removed ${idsToDelete.length} snapshots`
+                );
+            }
+        }
+
+    } catch (err) {
+
+        console.error(
+            "Compression failed:",
+            err
+        );
+    }
+}
+
+setInterval(cleanupOldHistory, 24 * 60 * 60 * 1000);
+setInterval(compressStockHistory, 24 * 60 * 60 * 1000);
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
