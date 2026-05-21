@@ -354,7 +354,7 @@ app.post("/trade", async (req, res) => {
                 error: "Invalid shares"
             });
         }
-
+            
         if (
             type !== "BUY" &&
             type !== "SELL"
