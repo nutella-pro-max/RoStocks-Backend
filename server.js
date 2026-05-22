@@ -249,6 +249,31 @@ function updateAllStocksAlive(volatilityPercent = 0.5) {
     }
 }
 
+// ensure stock exists
+async function ensureStockExists(stock) {
+
+    if (!STOCKS[stock]) {
+
+        STOCKS[stock] = {
+            price: 10,
+            lastSaved: 0
+        };
+
+        // create initial history snapshot
+        const now = Date.now();
+
+        await supabase
+            .from("stock_history")
+            .insert({
+                stock,
+                price: 10,
+                timestamp: now
+            });
+
+        STOCKS[stock].lastSaved = now;
+    }
+}
+
 // =========================================================
 // MAIN ROUTE
 // =========================================================
@@ -257,6 +282,8 @@ app.get("/history/:stock", async (req, res) => {
     try {
 
         const stock = req.params.stock;
+
+        await ensureStockExists(stock);
 
         const { data, error } = await supabase
             .from("stock_history")
@@ -294,13 +321,7 @@ app.get("/stock/:stock", async (req, res) => {
 
         const stock = req.params.stock;
 
-        if (!STOCKS[stock]) {
-
-            return res.json({
-                success: false,
-                error: "Stock not found"
-            });
-        }
+        await ensureStockExists(stock);
 
         return res.json({
             success: true,
