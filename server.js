@@ -43,7 +43,7 @@ CONSTANTS
 const STOCKS = {};
 
 const MARKET_TICK_MINUTES = 5;
-const VOLATILITY = 5;
+const VOLATILITY = 25;
 
 const ONE_HOUR = 60 * 60 * 1000;
 const ONE_DAY = 24 * ONE_HOUR;
@@ -325,7 +325,7 @@ function calculateNewPrice(
     return Number(newPrice.toFixed(2));
 }
 
-function updateAllStocksAlive(volatilityPercent = 5) {
+function updateAllStocksAlive(volatilityPercent = 25) {
 
     for (const stock in STOCKS) {
 
