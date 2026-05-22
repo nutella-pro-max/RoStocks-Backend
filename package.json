@@ -14,6 +14,7 @@
   "dependencies": {
     "axios": "^1.16.1",
     "express": "^5.2.1",
-    "@supabase/supabase-js": "^2.0.0"
+    "@supabase/supabase-js": "^2.0.0",
+    "express-rate-limit": "^7.x"
   }
 }
