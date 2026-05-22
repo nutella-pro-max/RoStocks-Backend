@@ -1113,9 +1113,21 @@ START
 =========================================================
 */
 
-app.listen(PORT, () => {
+async function loadStocksFromDB() {
 
-    console.log(
-        `Server running on port ${PORT}`
-    );
-});
+    const { data } = await supabase
+        .from("stocks")
+        .select("*");
+
+    for (const row of data || []) {
+        STOCKS[row.stock] = {
+            price: row.price,
+            lastSaved: row.last_saved || 0
+        };
+    }
+}
+
+app.listen(PORT, async () => {
+    await loadStocksFromDB();
+    console.log(`Server running on port ${PORT}`);
+})
