@@ -43,14 +43,14 @@ CONSTANTS
 const STOCKS = {};
 
 const MARKET_TICK_MINUTES = 5;
-const VOLATILITY = 0.5;
+const VOLATILITY = 5;
 
 const ONE_HOUR = 60 * 60 * 1000;
 const ONE_DAY = 24 * ONE_HOUR;
 const ONE_WEEK = 7 * ONE_DAY;
 const ONE_MONTH = 30 * ONE_DAY;
 
-const MAX_SHARES_PER_TRADE = 1000;
+const MAX_SHARES_PER_TRADE = 5000;
 const MAX_STOCK_NAME_LENGTH = 32;
 
 const REQUEST_TIMEOUT = 15000;
@@ -325,7 +325,7 @@ function calculateNewPrice(
     return Number(newPrice.toFixed(2));
 }
 
-function updateAllStocksAlive(volatilityPercent = 0.5) {
+function updateAllStocksAlive(volatilityPercent = 5) {
 
     for (const stock in STOCKS) {
 
