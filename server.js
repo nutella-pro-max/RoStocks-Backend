@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 
 /* =========================================================
-RATE LIMITING
+RATE LIMIT
 ========================================================= */
 app.use(
   rateLimit({
@@ -29,10 +29,10 @@ const supabase = createClient(
 );
 
 /* =========================================================
-CONSTANTS
+STATE
 ========================================================= */
 const STOCKS = {};
-const STOCK_QUEUES = {}; // ✅ race-safe per-stock queue
+const QUEUES = {};
 
 const MARKET_TICK_MINUTES = 5;
 const VOLATILITY = 25;
@@ -44,20 +44,14 @@ const ONE_MONTH = 30 * ONE_DAY;
 
 const MAX_SHARES_PER_TRADE = 5000;
 const MAX_STOCK_NAME_LENGTH = 32;
-const REQUEST_TIMEOUT = 15000;
 
-/* =========================================================
-CACHE
-========================================================= */
-const ACCOUNT_VALUE_CACHE = {};
-let ROLIMONS_CACHE = null;
-let ROLIMONS_LAST_FETCH = 0;
+const ACCOUNT_CACHE = {};
 
 /* =========================================================
 HTTP
 ========================================================= */
 const http = axios.create({
-  timeout: REQUEST_TIMEOUT,
+  timeout: 15000,
   headers: { "User-Agent": "RoAPI/1.0" }
 });
 
@@ -69,27 +63,18 @@ const isId = (v) => /^\d+$/.test(v);
 function validateStockName(stock) {
   return (
     typeof stock === "string" &&
-    stock.length > 0 &&
     stock.length <= MAX_STOCK_NAME_LENGTH &&
     /^[a-zA-Z0-9_\- ]+$/.test(stock)
   );
 }
 
-function randomBetween(min, max) {
-  return Math.random() * (max - min) + min;
-}
-
 /* =========================================================
-RACE SAFE QUEUE
+QUEUE (RACE SAFE DB WRITES)
 ========================================================= */
 function enqueue(stock, fn) {
-  if (!STOCK_QUEUES[stock]) STOCK_QUEUES[stock] = Promise.resolve();
-
-  STOCK_QUEUES[stock] = STOCK_QUEUES[stock]
-    .then(fn)
-    .catch((err) => console.error("Queue error:", err));
-
-  return STOCK_QUEUES[stock];
+  if (!QUEUES[stock]) QUEUES[stock] = Promise.resolve();
+  QUEUES[stock] = QUEUES[stock].then(fn).catch(console.error);
+  return QUEUES[stock];
 }
 
 /* =========================================================
@@ -109,126 +94,38 @@ async function getUserCounts(userId) {
   };
 }
 
-async function getAllCollectibles(userId, maxPages = 20) {
-  let cursor = null;
-  let collectibles = [];
-
-  for (let i = 0; i < maxPages; i++) {
-    const res = await http.get(
-      `https://inventory.roblox.com/v1/users/${userId}/assets/collectibles`,
-      { params: { limit: 100, sortOrder: "Asc", cursor } }
-    );
-
-    collectibles.push(...(res.data.data || []));
-    if (!res.data.nextPageCursor) break;
-
-    cursor = res.data.nextPageCursor;
-  }
-
-  return collectibles;
-}
-
-async function getRolimonsData() {
-  const TEN_MIN = 10 * 60 * 1000;
-
-  if (ROLIMONS_CACHE && Date.now() - ROLIMONS_LAST_FETCH < TEN_MIN) {
-    return ROLIMONS_CACHE;
-  }
-
-  const res = await http.get("https://www.rolimons.com/itemapi/itemdetails");
-  ROLIMONS_CACHE = res.data.items || {};
-  ROLIMONS_LAST_FETCH = Date.now();
-  return ROLIMONS_CACHE;
-}
-
 async function getAccountValue(userId) {
-  const cache = ACCOUNT_VALUE_CACHE[userId];
-  if (cache && cache.expires > Date.now()) return cache.data;
+  if (ACCOUNT_CACHE[userId] && ACCOUNT_CACHE[userId].expires > Date.now()) {
+    return ACCOUNT_CACHE[userId].data;
+  }
 
   try {
-    const collectibles = await getAllCollectibles(userId);
-    const itemData = await getRolimonsData();
+    const res = await http.get(
+      `https://inventory.roblox.com/v1/users/${userId}/assets/collectibles?limit=100`
+    );
 
-    let totalRAP = 0;
-    let totalValue = 0;
-
-    for (const item of collectibles) {
-      const details = itemData[item.assetId];
-      if (!details) continue;
-
-      const rap = details[2] || 0;
-      const value = details[3] || rap;
-
-      totalRAP += rap;
-      totalValue += value;
-    }
+    const collectibles = res.data.data || [];
 
     const result = {
       collectibleCount: collectibles.length,
-      totalRAP,
-      totalValue
+      totalValue: collectibles.length * 10
     };
 
-    ACCOUNT_VALUE_CACHE[userId] = {
+    ACCOUNT_CACHE[userId] = {
       data: result,
       expires: Date.now() + 5 * 60 * 1000
     };
 
     return result;
   } catch {
-    return {
-      collectibleCount: 0,
-      totalRAP: 0,
-      totalValue: 0,
-      error: "Inventory may be private"
-    };
-  }
-}
-
-/* =========================================================
-MARKET
-========================================================= */
-function calculateNewPrice(oldPrice, shares, type, followers, accountValue, accountAgeDays) {
-  const followerScore = Math.log10(followers + 1) * 1.5;
-  const valueScore = Math.log10(accountValue + 1) * 2;
-  const ageScore = Math.log10(accountAgeDays + 1) * 1.2;
-
-  const reputationValue = 10 + followerScore + valueScore + ageScore;
-
-  const marketForce = Math.log10(shares + 1) * 0.8;
-
-  let newPrice = oldPrice;
-
-  if (type === "BUY") newPrice += marketForce;
-  if (type === "SELL") newPrice -= marketForce;
-
-  newPrice = newPrice * 0.8 + reputationValue * 0.2;
-
-  return Number(Math.max(1, newPrice).toFixed(2));
-}
-
-/* =========================================================
-STOCK UPDATE
-========================================================= */
-function updateAllStocksAlive(volatilityPercent = 25) {
-  for (const stock in STOCKS) {
-    const current = STOCKS[stock].price;
-
-    const changePercent =
-      randomBetween(-volatilityPercent, volatilityPercent) +
-      (Math.random() - 0.5) * 0.2;
-
-    let newPrice = current + current * (changePercent / 100);
-    newPrice = Math.max(1, newPrice);
-
-    STOCKS[stock].price = Number(newPrice.toFixed(2));
+    return { collectibleCount: 0, totalValue: 0 };
   }
 }
 
 /* =========================================================
 STOCK INIT
 ========================================================= */
-async function ensureStockExists(stock) {
+async function ensureStock(stock) {
   if (!STOCKS[stock]) {
     const { data } = await supabase
       .from("stocks")
@@ -260,23 +157,9 @@ async function ensureStockExists(stock) {
 }
 
 /* =========================================================
-SAVE STOCK (RACE SAFE)
+SAVE HISTORY (EVERY 10 MIN)
 ========================================================= */
-function saveStock(stock) {
-  return enqueue(stock, async () => {
-    await supabase.from("stocks").upsert({
-      stock,
-      price: STOCKS[stock].price,
-      last_saved: STOCKS[stock].lastSaved,
-      updated_at: new Date().toISOString()
-    });
-  });
-}
-
-/* =========================================================
-HISTORY SAVE (FIXED: ALWAYS 10 MIN INTERVAL RELIABLY)
-========================================================= */
-async function saveHistory(stock, price) {
+function saveHistory(stock, price) {
   return enqueue(stock, async () => {
     const now = Date.now();
 
@@ -293,170 +176,256 @@ async function saveHistory(stock, price) {
 }
 
 /* =========================================================
-COMPRESSION (UPDATED RULES)
+SAVE STOCK
 ========================================================= */
-async function compressStockHistory() {
-  try {
-    const now = Date.now();
-
-    const { data } = await supabase
-      .from("stock_history")
-      .select("*")
-      .order("timestamp", { ascending: true });
-
-    const grouped = {};
-    for (const row of data || []) {
-      grouped[row.stock] ??= [];
-      grouped[row.stock].push(row);
-    }
-
-    for (const stock in grouped) {
-      const snapshots = grouped[stock];
-
-      let last1h = 0;
-      let last4h = 0;
-      let lastDay = 0;
-      let last4Day = 0;
-
-      const deleteIds = [];
-
-      for (const s of snapshots) {
-        const age = now - s.timestamp;
-
-        if (age > ONE_MONTH) {
-          deleteIds.push(s.id);
-          continue;
-        }
-
-        if (age <= 3 * ONE_HOUR) continue;
-
-        if (age <= ONE_DAY) {
-          if (s.timestamp - last1h < ONE_HOUR) deleteIds.push(s.id);
-          else last1h = s.timestamp;
-          continue;
-        }
-
-        if (age <= ONE_WEEK) {
-          if (s.timestamp - last4h < 4 * ONE_HOUR) deleteIds.push(s.id);
-          else last4h = s.timestamp;
-          continue;
-        }
-
-        if (age <= ONE_MONTH) {
-          if (s.timestamp - lastDay < ONE_DAY) deleteIds.push(s.id);
-          else lastDay = s.timestamp;
-        }
-
-        if (age <= ONE_MONTH) {
-          if (s.timestamp - last4Day < 4 * ONE_DAY) deleteIds.push(s.id);
-          else last4Day = s.timestamp;
-        }
-      }
-
-      if (deleteIds.length) {
-        await supabase.from("stock_history").delete().in("id", deleteIds);
-        console.log(`Compressed ${stock}: removed ${deleteIds.length}`);
-      }
-    }
-  } catch (err) {
-    console.error("Compression failed:", err);
-  }
+function saveStock(stock) {
+  return enqueue(stock, async () => {
+    await supabase.from("stocks").upsert({
+      stock,
+      price: STOCKS[stock].price,
+      last_saved: STOCKS[stock].lastSaved
+    });
+  });
 }
 
 /* =========================================================
-TRADE ROUTE (USERID ONLY)
+PRICE CALC
 ========================================================= */
-app.post("/trade", async (req, res) => {
-  try {
-    const { stock, shares, type } = req.body;
+function calculatePrice(oldPrice, shares, type, followers, value, age) {
+  const rep =
+    Math.log10(followers + 1) +
+    Math.log10(value + 1) +
+    Math.log10(age + 1);
 
-    if (!isId(stock)) {
-      return res.json({ success: false, error: "Stock must be userId" });
-    }
+  const force = Math.log10(shares + 1);
 
-    if (typeof shares !== "number" || shares <= 0 || shares > MAX_SHARES_PER_TRADE) {
-      return res.json({ success: false, error: "Invalid shares" });
-    }
+  let price = oldPrice;
 
-    if (type !== "BUY" && type !== "SELL") {
-      return res.json({ success: false, error: "Invalid trade type" });
-    }
+  if (type === "BUY") price += force;
+  if (type === "SELL") price -= force;
 
-    const userId = stock;
+  price = price * 0.8 + rep * 2;
 
-    const userRes = await http.get(
-      `https://users.roblox.com/v1/users/${userId}`
-    );
-
-    const counts = await getUserCounts(userId);
-    const accountValue = await getAccountValue(userId);
-
-    const created = new Date(userRes.data.created);
-    const accountAgeDays = Math.floor((Date.now() - created) / ONE_DAY);
-
-    await ensureStockExists(userId);
-
-    const oldPrice = STOCKS[userId].price;
-
-    const newPrice = calculateNewPrice(
-      oldPrice,
-      shares,
-      type,
-      counts.followers,
-      accountValue.totalValue,
-      accountAgeDays
-    );
-
-    STOCKS[userId].price = newPrice;
-
-    await saveHistory(userId, newPrice);
-    await saveStock(userId);
-
-    return res.json({
-      success: true,
-      stock: userId,
-      oldPrice,
-      newPrice
-    });
-
-  } catch (err) {
-    return res.json({ success: false, error: err.message });
-  }
-});
+  return Math.max(1, Number(price.toFixed(2)));
+}
 
 /* =========================================================
 MARKET TICK
 ========================================================= */
-setInterval(async () => {
-  updateAllStocksAlive(VOLATILITY);
-
-  for (const stock in STOCKS) {
-    await saveStock(stock);
+function tick() {
+  for (const s in STOCKS) {
+    STOCKS[s].price += (Math.random() - 0.5) * 2;
+    STOCKS[s].price = Math.max(1, STOCKS[s].price);
   }
-
-  console.log("Market tick updated");
-}, MARKET_TICK_MINUTES * 60 * 1000);
+}
 
 /* =========================================================
-COMPRESSION
+COMPRESSION (UPDATED RULES)
 ========================================================= */
-setInterval(compressStockHistory, 6 * ONE_HOUR);
+async function compress() {
+  const now = Date.now();
+
+  const { data } = await supabase.from("stock_history").select("*");
+
+  const grouped = {};
+  for (const r of data || []) {
+    grouped[r.stock] ??= [];
+    grouped[r.stock].push(r);
+  }
+
+  for (const stock in grouped) {
+    const list = grouped[stock];
+
+    let last1h = 0;
+    let last4h = 0;
+    let lastDay = 0;
+    let last4Day = 0;
+
+    const del = [];
+
+    for (const r of list) {
+      const age = now - r.timestamp;
+
+      if (age > ONE_MONTH) {
+        del.push(r.id);
+        continue;
+      }
+
+      if (age <= ONE_HOUR) continue;
+
+      if (age <= ONE_DAY) {
+        if (r.timestamp - last1h < ONE_HOUR) del.push(r.id);
+        else last1h = r.timestamp;
+        continue;
+      }
+
+      if (age <= ONE_WEEK) {
+        if (r.timestamp - last4h < 4 * ONE_HOUR) del.push(r.id);
+        else last4h = r.timestamp;
+        continue;
+      }
+
+      if (age <= ONE_MONTH) {
+        if (r.timestamp - lastDay < ONE_DAY) del.push(r.id);
+        else lastDay = r.timestamp;
+      }
+
+      if (r.timestamp - last4Day < 4 * ONE_DAY) del.push(r.id);
+      else last4Day = r.timestamp;
+    }
+
+    if (del.length) {
+      await supabase.from("stock_history").delete().in("id", del);
+    }
+  }
+}
+
+/* =========================================================
+ROUTES (RESTORED)
+========================================================= */
+
+// STOCK
+app.get("/stock/:stock", async (req, res) => {
+  const stock = req.params.stock;
+  if (!validateStockName(stock))
+    return res.json({ success: false, error: "Invalid stock" });
+
+  await ensureStock(stock);
+  res.json({ success: true, stock, price: STOCKS[stock].price });
+});
+
+// HISTORY
+app.get("/history/:stock", async (req, res) => {
+  const stock = req.params.stock;
+  await ensureStock(stock);
+
+  const { data } = await supabase
+    .from("stock_history")
+    .select("*")
+    .eq("stock", stock)
+    .order("timestamp");
+
+  res.json({ success: true, history: data });
+});
+
+// USER / PLAYER
+app.get(["/user/:value", "/player/:value"], async (req, res) => {
+  const value = req.params.value;
+
+  let userId = value;
+
+  if (!isId(value)) {
+    const r = await http.post(
+      "https://users.roblox.com/v1/usernames/users",
+      { usernames: [value] }
+    );
+    userId = r.data?.data?.[0]?.id;
+  }
+
+  const user = await http.get(
+    `https://users.roblox.com/v1/users/${userId}`
+  );
+
+  const counts = await getUserCounts(userId);
+  const account = await getAccountValue(userId);
+
+  res.json({ success: true, user: user.data, counts, account });
+});
+
+// GAME / EXPERIENCE
+app.get(["/game/:value", "/experience/:value"], async (req, res) => {
+  const v = req.params.value;
+
+  const r = isId(v)
+    ? await http.get(`https://games.roblox.com/v1/games?universeIds=${v}`)
+    : await http.get(`https://games.roblox.com/v1/games/list?keyword=${v}`);
+
+  res.json({ success: true, data: r.data });
+});
+
+// GROUP
+app.get("/group/:value", async (req, res) => {
+  const v = req.params.value;
+
+  const r = isId(v)
+    ? await http.get(`https://groups.roblox.com/v1/groups/${v}`)
+    : await http.get(`https://groups.roblox.com/v1/groups/search?keyword=${v}`);
+
+  res.json({ success: true, data: r.data });
+});
+
+// ASSET
+app.get("/asset/:value", async (req, res) => {
+  const v = req.params.value;
+
+  const r = isId(v)
+    ? await http.get(`https://economy.roblox.com/v2/assets/${v}/details`)
+    : await http.get(
+        `https://catalog.roblox.com/v1/search/items/details?Keyword=${v}`
+      );
+
+  res.json({ success: true, data: r.data });
+});
+
+/* =========================================================
+TRADE
+========================================================= */
+app.post("/trade", async (req, res) => {
+  const { stock, shares, type } = req.body;
+
+  if (!isId(stock))
+    return res.json({ success: false, error: "stock must be userId" });
+
+  await ensureStock(stock);
+
+  const user = await http.get(
+    `https://users.roblox.com/v1/users/${stock}`
+  );
+
+  const counts = await getUserCounts(stock);
+  const account = await getAccountValue(stock);
+
+  const age = Math.floor(
+    (Date.now() - new Date(user.data.created)) / ONE_DAY
+  );
+
+  const old = STOCKS[stock].price;
+
+  const newPrice = calculatePrice(
+    old,
+    shares,
+    type,
+    counts.followers,
+    account.totalValue,
+    age
+  );
+
+  STOCKS[stock].price = newPrice;
+
+  await saveHistory(stock, newPrice);
+  await saveStock(stock);
+
+  res.json({ success: true, old, newPrice });
+});
 
 /* =========================================================
 START
 ========================================================= */
-async function loadStocksFromDB() {
+async function load() {
   const { data } = await supabase.from("stocks").select("*");
 
-  for (const row of data || []) {
-    STOCKS[row.stock] = {
-      price: row.price,
-      lastSaved: row.last_saved || 0
+  for (const r of data || []) {
+    STOCKS[r.stock] = {
+      price: r.price,
+      lastSaved: r.last_saved || 0
     };
   }
 }
 
+setInterval(tick, MARKET_TICK_MINUTES * 60000);
+setInterval(compress, 6 * ONE_HOUR);
+
 app.listen(PORT, async () => {
-  await loadStocksFromDB();
-  console.log(`Server running on port ${PORT}`);
+  await load();
+  console.log("server running");
 });
