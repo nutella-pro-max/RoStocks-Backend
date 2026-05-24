@@ -68,13 +68,15 @@ const QUEUES = Object.create(null);
 const STOCK_LOADS = Object.create(null);
 const ACCOUNT_CACHE = Object.create(null);
 const ACCOUNT_AGE_CACHE = Object.create(null);
+const STOCK_MOMENTUM = Object.create(null);
 
 const ONE_HOUR = 60 * 60 * 1000;
 const ONE_DAY = 24 * ONE_HOUR;
 const ONE_WEEK = 7 * ONE_DAY;
 const ONE_MONTH = 30 * ONE_DAY;
 
-const VOLATILITY = 25;
+const VOLATILITY = 8;
+const MOMENTUM = 0.75;
 
 const MARKET_TICK_MINUTES = 2;
 const HISTORY_SAVE_INTERVAL_MINUTES = 10;
@@ -100,7 +102,7 @@ const MAX_COLLECTIBLE_PAGES = 5;
 const ACCOUNT_CACHE_TTL = 5 * 60 * 1000;
 const ACCOUNT_CACHE_MAX_ITEMS = 500;
 const ACCOUNT_AGE_CACHE_TTL = ONE_DAY;
-const PASSIVE_RANDOMNESS_MIN = 0.2;
+const PASSIVE_RANDOMNESS_MIN = 0.25;
 
 let server;
 let tickTimer;
@@ -636,10 +638,18 @@ function calculatePrice(oldPrice, shares, type, followers, value, age) {
   return clampPrice(price);
 }
 
-function calculatePassiveMovement(ageDays) {
+function calculatePassiveMovement(stock, ageDays) {
   const randomness = getPassiveRandomnessMultiplier(ageDays);
+  const randomMovement =
+    (Math.random() - 0.5) * 2 * (VOLATILITY / 25) * randomness;
 
-  return (Math.random() - 0.5) * 2 * (VOLATILITY / 25) * randomness;
+  const previousMovement = STOCK_MOMENTUM[stock] || 0;
+  const movement =
+    previousMovement * MOMENTUM + randomMovement * (1 - MOMENTUM);
+
+  STOCK_MOMENTUM[stock] = movement;
+
+  return movement;
 }
 
 /* =========================================================
@@ -648,7 +658,7 @@ MARKET TICK
 async function tick() {
   const updates = Object.keys(STOCKS).map(async (stock) => {
     const ageDays = await getAccountAgeDays(stock);
-    const movement = calculatePassiveMovement(ageDays);
+    const movement = calculatePassiveMovement(stock, ageDays);
 
     STOCKS[stock].price = clampPrice(STOCKS[stock].price + movement);
 
