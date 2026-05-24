@@ -68,6 +68,8 @@ const QUEUES = Object.create(null);
 const STOCK_LOADS = Object.create(null);
 const ACCOUNT_CACHE = Object.create(null);
 const ACCOUNT_AGE_CACHE = Object.create(null);
+const HISTORY_COMPRESSION_CHECK_CACHE = Object.create(null);
+const HISTORY_COMPRESSION_RUNNING = Object.create(null);
 const STOCK_MOMENTUM = Object.create(null);
 
 const ONE_HOUR = 60 * 60 * 1000;
@@ -98,6 +100,7 @@ const COMPRESSION_FOURTH_CHECK_INTERVAL = 3 * ONE_DAY;
 const MAX_SHARES_PER_TRADE = 1000 * 1000;
 const MAX_STOCK_NAME_LENGTH = 64;
 const MAX_HISTORY_DELETE_BATCH = 1000;
+const HISTORY_COMPRESSION_CHECK_TTL = 15 * 60 * 1000;
 const MAX_COLLECTIBLE_PAGES = 10;
 const ACCOUNT_CACHE_TTL = 5 * 60 * 1000;
 const ACCOUNT_CACHE_MAX_ITEMS = 1000;
@@ -140,7 +143,7 @@ function normalizeExternalError(error) {
     if (status === 429) {
       return new AppError(429, "Upstream rate limit reached");
     }
-
+  
     return new AppError(
       status >= 500 ? 502 : status,
       "Upstream request failed",
@@ -672,6 +675,70 @@ async function tick() {
 /* =========================================================
 COMPRESSION (UPDATED RULES)
 ========================================================= */
+
+function shouldCheckHistoryCompression(stock) {
+  const lastCheck = HISTORY_COMPRESSION_CHECK_CACHE[stock] || 0;
+  const now = Date.now();
+
+  if (now - lastCheck < HISTORY_COMPRESSION_CHECK_TTL) {
+    return false;
+  }
+
+  HISTORY_COMPRESSION_CHECK_CACHE[stock] = now;
+  return true;
+}
+
+async function compressStock(stock) {
+  const key = normalizeStockName(stock);
+
+  if (!validateStockName(key)) {
+    throw new AppError(400, "Invalid stock");
+  }
+
+  const now = Date.now();
+
+  const history = handleSupabase(
+    await supabase
+      .from("stock_history")
+      .select("id, stock, price, timestamp")
+      .eq("stock", key)
+      .order("timestamp", { ascending: true }),
+    "read history"
+  );
+
+  const deletions = [];
+  const lastKeptByInterval = Object.create(null);
+
+  for (const row of history || []) {
+    const timestamp = Number(row.timestamp);
+    const age = now - timestamp;
+    const interval = getRetentionInterval(age);
+
+    if (interval === null) {
+      deletions.push(row.id);
+      continue;
+    }
+
+    const bucket = interval;
+    const lastKept = lastKeptByInterval[bucket] || 0;
+
+    if (timestamp - lastKept < interval) {
+      deletions.push(row.id);
+    } else {
+      lastKeptByInterval[bucket] = timestamp;
+    }
+  }
+
+  for (const ids of chunk(deletions, MAX_HISTORY_DELETE_BATCH)) {
+    handleSupabase(
+      await supabase.from("stock_history").delete().in("id", ids),
+      "delete compressed history"
+    );
+  }
+
+  return { stock: key, deleted: deletions.length };
+}
+
 async function compress() {
   const now = Date.now();
 
@@ -761,6 +828,17 @@ app.get(
 
     await ensureStock(stock);
 
+    let compressed = false;
+
+    if (shouldCheckHistoryCompression(stock)) {
+      try {
+        const result = await compressStock(stock);
+        compressed = result.deleted > 0;
+      } catch (error) {
+        console.error(`history compression failed for ${stock}:`, error);
+      }
+    }
+
     const history = handleSupabase(
       await supabase
         .from("stock_history")
@@ -776,14 +854,15 @@ app.get(
       timestamp: Date.now(),
       live: true
     };
-    
+
     res.json({
       success: true,
       stock,
+      compressed,
       history: [...history, livePoint]
     });
   })
-);
+); 
 
 // USER / PLAYER
 app.get(
@@ -1042,6 +1121,7 @@ module.exports = {
   start,
   load,
   tick,
+  compressStock,
   compress,
   calculatePrice,
   calculatePassiveMovement,
