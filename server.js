@@ -69,6 +69,11 @@ const STOCK_LOADS = Object.create(null);
 const ACCOUNT_CACHE = Object.create(null);
 const ACCOUNT_AGE_CACHE = Object.create(null);
 
+const ONE_HOUR = 60 * 60 * 1000;
+const ONE_DAY = 24 * ONE_HOUR;
+const ONE_WEEK = 7 * ONE_DAY;
+const ONE_MONTH = 30 * ONE_DAY;
+
 const VOLATILITY = 25;
 
 const MARKET_TICK_MINUTES = 2;
