@@ -95,12 +95,14 @@ const COMPRESSION_THIRD_CHECK_INTERVAL = ONE_DAY;
 const COMPRESSION_FOURTH_CHECK_AGE = ONE_MONTH;
 const COMPRESSION_FOURTH_CHECK_INTERVAL = 5 * ONE_DAY;
 
-const MAX_SHARES_PER_TRADE = 5000;
-const MAX_STOCK_NAME_LENGTH = 32;
-const MAX_HISTORY_DELETE_BATCH = 500;
-const MAX_COLLECTIBLE_PAGES = 5;
+const MAX_HISTORY_SIZE = 30;
+
+const MAX_SHARES_PER_TRADE = 1000 * 1000;
+const MAX_STOCK_NAME_LENGTH = 64;
+const MAX_HISTORY_DELETE_BATCH = 1000;
+const MAX_COLLECTIBLE_PAGES = 10;
 const ACCOUNT_CACHE_TTL = 5 * 60 * 1000;
-const ACCOUNT_CACHE_MAX_ITEMS = 500;
+const ACCOUNT_CACHE_MAX_ITEMS = 1000;
 const ACCOUNT_AGE_CACHE_TTL = ONE_DAY;
 const PASSIVE_RANDOMNESS_MIN = 0.25;
 
@@ -871,6 +873,12 @@ app.get(
 /* =========================================================
 TRADE
 ========================================================= */
+
+app.post("/admin/compress", asyncRoute(async (req, res) => {
+  const result = await compress();
+  res.json({ success: true, ...result });
+}));
+
 app.post(
   "/trade",
   asyncRoute(async (req, res) => {
