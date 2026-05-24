@@ -77,7 +77,7 @@ const ONE_DAY = 24 * ONE_HOUR;
 const ONE_WEEK = 7 * ONE_DAY;
 const ONE_MONTH = 30 * ONE_DAY;
 
-const VOLATILITY = 8;
+const VOLATILITY = 15;
 const MOMENTUM = 0.75;
 
 const MARKET_TICK_MINUTES = 2;
