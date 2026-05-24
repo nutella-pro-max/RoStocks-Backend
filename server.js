@@ -1,76 +1,16 @@
+"use strict";
+
 const express = require("express");
 const axios = require("axios");
 const rateLimit = require("express-rate-limit");
 const { createClient } = require("@supabase/supabase-js");
 
-function readPositiveIntegerEnv(name, fallback, max = Number.MAX_SAFE_INTEGER) {
-  const raw = process.env[name];
-  const value = raw === undefined ? fallback : Number(raw);
-
-  if (!Number.isInteger(value) || value < 1 || value > max) {
-    throw new Error(`${name} must be an integer between 1 and ${max}`);
-  }
-
-  return value;
-}
-
-const app = express();
-const PORT = readPositiveIntegerEnv("PORT", 3000, 65535);
-
-app.disable("x-powered-by");
-
-if (process.env.TRUST_PROXY) {
-  app.set("trust proxy", process.env.TRUST_PROXY);
-}
-
-app.use(express.json({ limit: "32kb" }));
-
 /* =========================================================
-RATE LIMIT
+CONFIG
 ========================================================= */
-app.use(
-  rateLimit({
-    windowMs: 60 * 1000,
-    max: readPositiveIntegerEnv("RATE_LIMIT_PER_MINUTE", 120),
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { success: false, error: "Too many requests" }
-  })
-);
 
-/* =========================================================
-SUPABASE
-========================================================= */
-function requireEnv(name) {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} is required`);
-  }
-  return value;
-}
-
-const supabase = createClient(
-  requireEnv("SUPABASE_URL"),
-  requireEnv("SUPABASE_KEY"),
-  {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false
-    }
-  }
-);
-
-/* =========================================================
-STATE
-========================================================= */
-const STOCKS = Object.create(null);
-const QUEUES = Object.create(null);
-const STOCK_LOADS = Object.create(null);
-const ACCOUNT_CACHE = Object.create(null);
-const ACCOUNT_AGE_CACHE = Object.create(null);
-const HISTORY_COMPRESSION_CHECK_CACHE = Object.create(null);
-const HISTORY_COMPRESSION_RUNNING = Object.create(null);
-const STOCK_MOMENTUM = Object.create(null);
+const MIN_PRICE = 1;
+const DEFAULT_STOCK_PRICE = 10;
 
 const ONE_HOUR = 60 * 60 * 1000;
 const ONE_DAY = 24 * ONE_HOUR;
@@ -107,13 +47,104 @@ const ACCOUNT_CACHE_MAX_ITEMS = 1000;
 const ACCOUNT_AGE_CACHE_TTL = ONE_DAY;
 const PASSIVE_RANDOMNESS_MIN = 0.25;
 
+function readPositiveIntegerEnv(name, fallback, max = Number.MAX_SAFE_INTEGER) {
+  const raw = process.env[name];
+  const value = raw === undefined ? fallback : Number(raw);
+
+  if (!Number.isInteger(value) || value < 1 || value > max) {
+    throw new Error(`${name} must be an integer between 1 and ${max}`);
+  }
+
+  return value;
+}
+
+function requireEnv(name) {
+  const value = process.env[name];
+
+  if (!value) {
+    throw new Error(`${name} is required`);
+  }
+
+  return value;
+}
+
+function readTrustProxyEnv(value) {
+  if (value === undefined || value === "") return undefined;
+
+  const normalized = String(value).trim().toLowerCase();
+
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+
+  const numericValue = Number(value);
+  if (Number.isInteger(numericValue) && numericValue >= 0) return numericValue;
+
+  return value;
+}
+
+const config = Object.freeze({
+  port: readPositiveIntegerEnv("PORT", 3000, 65535),
+  rateLimitPerMinute: readPositiveIntegerEnv("RATE_LIMIT_PER_MINUTE", 120),
+  trustProxy: readTrustProxyEnv(process.env.TRUST_PROXY),
+  supabaseUrl: requireEnv("SUPABASE_URL"),
+  supabaseKey: requireEnv("SUPABASE_KEY")
+});
+
+/* =========================================================
+APPLICATION
+========================================================= */
+
+const app = express();
+
+app.disable("x-powered-by");
+
+if (config.trustProxy !== undefined) {
+  app.set("trust proxy", config.trustProxy);
+}
+
+app.use(express.json({ limit: "32kb" }));
+
+app.use(
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: config.rateLimitPerMinute,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, error: "Too many requests" }
+  })
+);
+
+/* =========================================================
+SUPABASE
+========================================================= */
+
+const supabase = createClient(config.supabaseUrl, config.supabaseKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false
+  }
+});
+
+/* =========================================================
+STATE
+========================================================= */
+
+const STOCKS = Object.create(null);
+const QUEUES = Object.create(null);
+const STOCK_LOADS = Object.create(null);
+const ACCOUNT_CACHE = Object.create(null);
+const ACCOUNT_AGE_CACHE = Object.create(null);
+const HISTORY_COMPRESSION_CHECK_CACHE = Object.create(null);
+const STOCK_MOMENTUM = Object.create(null);
+
 let server;
 let tickTimer;
 let compressTimer;
 
 /* =========================================================
-HTTP
+HTTP CLIENT
 ========================================================= */
+
 const http = axios.create({
   timeout: 15000,
   headers: { "User-Agent": "RoAPI/1.0" }
@@ -122,9 +153,11 @@ const http = axios.create({
 /* =========================================================
 ERRORS
 ========================================================= */
+
 class AppError extends Error {
   constructor(status, message, details) {
     super(message);
+    this.name = "AppError";
     this.status = status;
     this.details = details;
   }
@@ -143,15 +176,11 @@ function normalizeExternalError(error) {
     if (status === 429) {
       return new AppError(429, "Upstream rate limit reached");
     }
-  
-    return new AppError(
-      status >= 500 ? 502 : status,
-      "Upstream request failed",
-      {
-        upstreamStatus: status,
-        upstreamData: error.response.data
-      }
-    );
+
+    return new AppError(status >= 500 ? 502 : status, "Upstream request failed", {
+      upstreamStatus: status,
+      upstreamData: error.response.data
+    });
   }
 
   if (error.code === "ECONNABORTED") {
@@ -180,12 +209,37 @@ function handleSupabase(result, action) {
 }
 
 /* =========================================================
-UTILS
+UTILITIES
 ========================================================= */
-const isId = (value) => /^\d+$/.test(String(value || "").trim());
+
+const isId = (value) => /^\d+$/.test(String(value ?? "").trim());
+
+function toFiniteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function clampPrice(price) {
+  const safePrice = toFiniteNumber(price, MIN_PRICE);
+  const roundedPrice = Number(safePrice.toFixed(2));
+
+  return Math.max(MIN_PRICE, roundedPrice);
+}
+
+function normalizeTimestamp(value, fallback = 0) {
+  const timestamp = toFiniteNumber(value, fallback);
+  return Math.max(0, Math.floor(timestamp));
+}
+
+function createStockState(price = DEFAULT_STOCK_PRICE, lastSaved = 0) {
+  return {
+    price: clampPrice(price),
+    lastSaved: normalizeTimestamp(lastSaved)
+  };
+}
 
 function normalizeStockName(stock) {
-  return String(stock || "").trim();
+  return String(stock ?? "").trim();
 }
 
 function validateStockName(stock) {
@@ -216,17 +270,13 @@ function parseShares(value) {
 }
 
 function normalizeTradeType(value) {
-  const type = String(value || "").trim().toUpperCase();
+  const type = String(value ?? "").trim().toUpperCase();
 
   if (type !== "BUY" && type !== "SELL") {
     throw new AppError(400, "type must be BUY or SELL");
   }
 
   return type;
-}
-
-function clampPrice(price) {
-  return Math.max(1, Number(Number(price).toFixed(2)));
 }
 
 function getRetentionInterval(age) {
@@ -274,8 +324,9 @@ function getPassiveRandomnessMultiplier(ageDays) {
 }
 
 /* =========================================================
-QUEUE (RACE SAFE DB WRITES)
+QUEUE
 ========================================================= */
+
 function enqueue(stock, fn) {
   const key = normalizeStockName(stock);
   const previous = QUEUES[key] || Promise.resolve();
@@ -298,6 +349,7 @@ function enqueue(stock, fn) {
 /* =========================================================
 ROBLOX HELPERS
 ========================================================= */
+
 async function getRobloxUserById(userId) {
   if (!isId(userId)) {
     throw new AppError(400, "userId must be numeric");
@@ -311,7 +363,7 @@ async function getRobloxUserById(userId) {
 }
 
 async function resolveUserId(value) {
-  const normalized = String(value || "").trim();
+  const normalized = String(value ?? "").trim();
 
   if (!normalized) {
     throw new AppError(400, "user value is required");
@@ -344,6 +396,7 @@ async function getCount(path) {
     return Number(response.data?.count || 0);
   } catch (error) {
     if (error.response?.status === 404) throw error;
+
     console.warn(`count request failed: ${path}`, error.message);
     return 0;
   }
@@ -354,12 +407,8 @@ async function getUserCounts(userId) {
 
   const [friends, followers, following] = await Promise.all([
     getCount(`https://friends.roblox.com/v1/users/${safeUserId}/friends/count`),
-    getCount(
-      `https://friends.roblox.com/v1/users/${safeUserId}/followers/count`
-    ),
-    getCount(
-      `https://friends.roblox.com/v1/users/${safeUserId}/followings/count`
-    )
+    getCount(`https://friends.roblox.com/v1/users/${safeUserId}/followers/count`),
+    getCount(`https://friends.roblox.com/v1/users/${safeUserId}/followings/count`)
   ]);
 
   return { friends, followers, following };
@@ -376,12 +425,15 @@ function pruneCache(cache, maxItems) {
   }
 
   const remaining = Object.entries(cache);
+
   if (remaining.length <= maxItems) return;
 
   remaining
     .sort((a, b) => a[1].expires - b[1].expires)
     .slice(0, remaining.length - maxItems)
-    .forEach(([key]) => delete cache[key]);
+    .forEach(([key]) => {
+      delete cache[key];
+    });
 }
 
 function pruneAccountCache() {
@@ -493,8 +545,9 @@ async function getAccountValue(userId) {
 }
 
 /* =========================================================
-STOCK INIT
+STOCKS
 ========================================================= */
+
 async function ensureStock(stock) {
   const key = normalizeStockName(stock);
 
@@ -502,32 +555,28 @@ async function ensureStock(stock) {
     throw new AppError(400, "Invalid stock");
   }
 
-  if (STOCKS[key]) return STOCKS[key];
+  if (STOCKS[key]) {
+    STOCKS[key].price = clampPrice(STOCKS[key].price);
+    STOCKS[key].lastSaved = normalizeTimestamp(STOCKS[key].lastSaved);
+    return STOCKS[key];
+  }
 
   if (!STOCK_LOADS[key]) {
     STOCK_LOADS[key] = enqueue(key, async () => {
       if (STOCKS[key]) return STOCKS[key];
 
       const rows = handleSupabase(
-        await supabase
-          .from("stocks")
-          .select("*")
-          .eq("stock", key)
-          .limit(1),
-        "read"
+        await supabase.from("stocks").select("*").eq("stock", key).limit(1),
+        "read stock"
       );
       const data = rows?.[0];
 
       if (data) {
-        STOCKS[key] = {
-          price: clampPrice(data.price),
-          lastSaved: Number(data.last_saved || 0)
-        };
-
+        STOCKS[key] = createStockState(data.price, data.last_saved);
         return STOCKS[key];
       }
 
-      STOCKS[key] = { price: 10, lastSaved: 0 };
+      STOCKS[key] = createStockState();
 
       handleSupabase(
         await supabase.from("stocks").upsert(
@@ -538,7 +587,7 @@ async function ensureStock(stock) {
           },
           { onConflict: "stock" }
         ),
-        "insert"
+        "insert stock"
       );
 
       handleSupabase(
@@ -547,7 +596,7 @@ async function ensureStock(stock) {
           price: STOCKS[key].price,
           timestamp: Date.now()
         }),
-        "insert history"
+        "insert stock history"
       );
 
       return STOCKS[key];
@@ -559,9 +608,6 @@ async function ensureStock(stock) {
   return STOCK_LOADS[key];
 }
 
-/* =========================================================
-SAVE HISTORY
-========================================================= */
 async function saveHistory(stock, price) {
   const key = normalizeStockName(stock);
 
@@ -570,17 +616,22 @@ async function saveHistory(stock, price) {
   return enqueue(key, async () => {
     const now = Date.now();
 
+    STOCKS[key].price = clampPrice(STOCKS[key].price);
+    STOCKS[key].lastSaved = normalizeTimestamp(STOCKS[key].lastSaved);
+
     if (now - STOCKS[key].lastSaved < HISTORY_SAVE_INTERVAL_MINUTES * 60000) {
       return false;
     }
 
+    const safePrice = clampPrice(price);
+
     handleSupabase(
       await supabase.from("stock_history").insert({
         stock: key,
-        price: clampPrice(price),
+        price: safePrice,
         timestamp: now
       }),
-      "insert history"
+      "insert stock history"
     );
 
     STOCKS[key].lastSaved = now;
@@ -588,21 +639,21 @@ async function saveHistory(stock, price) {
   });
 }
 
-/* =========================================================
-SAVE STOCK
-========================================================= */
 async function saveStock(stock) {
   const key = normalizeStockName(stock);
 
   await ensureStock(key);
 
   return enqueue(key, async () => {
+    STOCKS[key].price = clampPrice(STOCKS[key].price);
+    STOCKS[key].lastSaved = normalizeTimestamp(STOCKS[key].lastSaved);
+
     handleSupabase(
       await supabase.from("stocks").upsert(
         {
           stock: key,
-          price: clampPrice(STOCKS[key].price),
-          last_saved: Number(STOCKS[key].lastSaved || 0)
+          price: STOCKS[key].price,
+          last_saved: STOCKS[key].lastSaved
         },
         { onConflict: "stock" }
       ),
@@ -612,10 +663,11 @@ async function saveStock(stock) {
 }
 
 /* =========================================================
-PRICE CALC
+PRICE ENGINE
 ========================================================= */
+
 function calculatePrice(oldPrice, shares, type, followers, value, age) {
-  const safeOldPrice = clampPrice(oldPrice);
+  const basePrice = clampPrice(oldPrice);
   const safeShares = Math.min(
     Math.max(Number(shares) || 1, 1),
     MAX_SHARES_PER_TRADE
@@ -624,29 +676,24 @@ function calculatePrice(oldPrice, shares, type, followers, value, age) {
   const safeValue = Math.max(Number(value) || 0, 0);
   const safeAge = Math.max(Number(age) || 0, 0);
 
-  const rep =
+  const reputation =
     Math.log10(safeFollowers + 1) +
     Math.log10(safeValue + 1) +
     Math.log10(safeAge + 1);
 
-  const force = Math.log10(safeShares + 1);
+  const tradeForce = Math.log10(safeShares + 1);
+  const tradeAdjustedPrice =
+    type === "SELL" ? basePrice - tradeForce : basePrice + tradeForce;
+  const reputationAdjustedPrice = tradeAdjustedPrice * 0.8 + reputation * 2;
 
-  let price = safeOldPrice;
-
-  if (type === "BUY") price += force;
-  if (type === "SELL") price -= force;
-
-  price = price * 0.8 + rep * 2;
-
-  return clampPrice(price);
+  return clampPrice(reputationAdjustedPrice);
 }
 
 function calculatePassiveMovement(stock, ageDays) {
   const randomness = getPassiveRandomnessMultiplier(ageDays);
   const randomMovement =
     (Math.random() - 0.5) * 2 * (VOLATILITY / 25) * randomness;
-
-  const previousMovement = STOCK_MOMENTUM[stock] || 0;
+  const previousMovement = toFiniteNumber(STOCK_MOMENTUM[stock], 0);
   const movement =
     previousMovement * MOMENTUM + randomMovement * (1 - MOMENTUM);
 
@@ -655,17 +702,15 @@ function calculatePassiveMovement(stock, ageDays) {
   return movement;
 }
 
-/* =========================================================
-MARKET TICK
-========================================================= */
 async function tick() {
   const updates = Object.keys(STOCKS).map(async (stock) => {
     const ageDays = await getAccountAgeDays(stock);
     const movement = calculatePassiveMovement(stock, ageDays);
+    const nextPrice = clampPrice(STOCKS[stock].price + movement);
 
-    STOCKS[stock].price = clampPrice(STOCKS[stock].price + movement);
+    STOCKS[stock].price = nextPrice;
 
-    await saveHistory(stock, STOCKS[stock].price);
+    await saveHistory(stock, nextPrice);
     await saveStock(stock);
   });
 
@@ -673,7 +718,7 @@ async function tick() {
 }
 
 /* =========================================================
-COMPRESSION (UPDATED RULES)
+HISTORY COMPRESSION
 ========================================================= */
 
 function shouldCheckHistoryCompression(stock) {
@@ -688,29 +733,12 @@ function shouldCheckHistoryCompression(stock) {
   return true;
 }
 
-async function compressStock(stock) {
-  const key = normalizeStockName(stock);
-
-  if (!validateStockName(key)) {
-    throw new AppError(400, "Invalid stock");
-  }
-
-  const now = Date.now();
-
-  const history = handleSupabase(
-    await supabase
-      .from("stock_history")
-      .select("id, stock, price, timestamp")
-      .eq("stock", key)
-      .order("timestamp", { ascending: true }),
-    "read history"
-  );
-
+function getCompressedHistoryDeletions(history, now = Date.now()) {
   const deletions = [];
   const lastKeptByInterval = Object.create(null);
 
   for (const row of history || []) {
-    const timestamp = Number(row.timestamp);
+    const timestamp = normalizeTimestamp(row.timestamp);
     const age = now - timestamp;
     const interval = getRetentionInterval(age);
 
@@ -719,36 +747,59 @@ async function compressStock(stock) {
       continue;
     }
 
-    const bucket = interval;
-    const lastKept = lastKeptByInterval[bucket] || 0;
+    const lastKept = lastKeptByInterval[interval] || 0;
 
     if (timestamp - lastKept < interval) {
       deletions.push(row.id);
     } else {
-      lastKeptByInterval[bucket] = timestamp;
+      lastKeptByInterval[interval] = timestamp;
     }
   }
 
-  for (const ids of chunk(deletions, MAX_HISTORY_DELETE_BATCH)) {
+  return deletions;
+}
+
+async function deleteHistoryRows(ids) {
+  for (const batch of chunk(ids, MAX_HISTORY_DELETE_BATCH)) {
     handleSupabase(
-      await supabase.from("stock_history").delete().in("id", ids),
+      await supabase.from("stock_history").delete().in("id", batch),
       "delete compressed history"
     );
   }
+}
+
+async function compressStock(stock) {
+  const key = normalizeStockName(stock);
+
+  if (!validateStockName(key)) {
+    throw new AppError(400, "Invalid stock");
+  }
+
+  const history = handleSupabase(
+    await supabase
+      .from("stock_history")
+      .select("id, stock, price, timestamp")
+      .eq("stock", key)
+      .order("timestamp", { ascending: true }),
+    "read stock history"
+  );
+
+  const deletions = getCompressedHistoryDeletions(history);
+
+  await deleteHistoryRows(deletions);
 
   return { stock: key, deleted: deletions.length };
 }
 
 async function compress() {
   const now = Date.now();
-
   const history = handleSupabase(
     await supabase
       .from("stock_history")
       .select("id, stock, price, timestamp")
       .order("stock", { ascending: true })
       .order("timestamp", { ascending: true }),
-    "read history"
+    "read stock history"
   );
 
   const grouped = Object.create(null);
@@ -760,47 +811,19 @@ async function compress() {
 
   const deletions = [];
 
-  for (const stock in grouped) {
-    const lastKeptByInterval = Object.create(null);
-
-    for (const row of grouped[stock]) {
-      const timestamp = Number(row.timestamp);
-      const age = now - timestamp;
-      const interval = getRetentionInterval(age);
-
-      if (interval === null) {
-        deletions.push(row.id);
-        continue;
-      }
-
-      if (interval === 0) continue;
-
-      const bucket = interval;
-      const lastKept = lastKeptByInterval[bucket] || 0;
-
-      if (timestamp - lastKept < interval) {
-        deletions.push(row.id);
-      } else {
-        lastKeptByInterval[bucket] = timestamp;
-      }
-    }
+  for (const stock of Object.keys(grouped)) {
+    deletions.push(...getCompressedHistoryDeletions(grouped[stock], now));
   }
 
-  for (const ids of chunk(deletions, MAX_HISTORY_DELETE_BATCH)) {
-    handleSupabase(
-      await supabase.from("stock_history").delete().in("id", ids),
-      "delete compressed history"
-    );
-  }
+  await deleteHistoryRows(deletions);
 
   return { deleted: deletions.length };
 }
 
 /* =========================================================
-ROUTES (RESTORED)
+ROUTES
 ========================================================= */
 
-// HEALTH
 app.get("/health", (req, res) => {
   res.json({
     success: true,
@@ -809,18 +832,19 @@ app.get("/health", (req, res) => {
   });
 });
 
-// STOCK
 app.get(
   "/stock/:stock",
   asyncRoute(async (req, res) => {
     const stock = normalizeStockName(req.params.stock);
 
     await ensureStock(stock);
+
+    STOCKS[stock].price = clampPrice(STOCKS[stock].price);
+
     res.json({ success: true, stock, price: STOCKS[stock].price });
   })
 );
 
-// HISTORY
 app.get(
   "/history/:stock",
   asyncRoute(async (req, res) => {
@@ -845,12 +869,12 @@ app.get(
         .select("*")
         .eq("stock", stock)
         .order("timestamp", { ascending: true }),
-      "read history"
+      "read stock history"
     );
 
     const livePoint = {
       stock,
-      price: STOCKS[stock].price,
+      price: clampPrice(STOCKS[stock].price),
       timestamp: Date.now(),
       live: true
     };
@@ -862,9 +886,8 @@ app.get(
       history: [...history, livePoint]
     });
   })
-); 
+);
 
-// USER / PLAYER
 app.get(
   ["/user/:value", "/player/:value"],
   asyncRoute(async (req, res) => {
@@ -879,11 +902,10 @@ app.get(
   })
 );
 
-// GAME / EXPERIENCE
 app.get(
   ["/game/:value", "/experience/:value"],
   asyncRoute(async (req, res) => {
-    const value = String(req.params.value || "").trim();
+    const value = String(req.params.value ?? "").trim();
 
     if (!value) {
       throw new AppError(400, "game value is required");
@@ -901,11 +923,10 @@ app.get(
   })
 );
 
-// GROUP
 app.get(
   "/group/:value",
   asyncRoute(async (req, res) => {
-    const value = String(req.params.value || "").trim();
+    const value = String(req.params.value ?? "").trim();
 
     if (!value) {
       throw new AppError(400, "group value is required");
@@ -923,11 +944,10 @@ app.get(
   })
 );
 
-// ASSET
 app.get(
   "/asset/:value",
   asyncRoute(async (req, res) => {
-    const value = String(req.params.value || "").trim();
+    const value = String(req.params.value ?? "").trim();
 
     if (!value) {
       throw new AppError(400, "asset value is required");
@@ -946,10 +966,6 @@ app.get(
     res.json({ success: true, data: response.data });
   })
 );
-
-/* =========================================================
-TRADE
-========================================================= */
 
 app.post(
   "/trade",
@@ -978,9 +994,9 @@ app.post(
     };
     pruneAccountAgeCache();
 
-    const old = STOCKS[stock].price;
+    const oldPrice = clampPrice(STOCKS[stock].price);
     const newPrice = calculatePrice(
-      old,
+      oldPrice,
       shares,
       type,
       counts.followers,
@@ -998,7 +1014,8 @@ app.post(
       stock,
       type,
       shares,
-      old,
+      old: oldPrice,
+      oldPrice,
       newPrice,
       user,
       counts,
@@ -1010,6 +1027,7 @@ app.post(
 /* =========================================================
 ERROR HANDLING
 ========================================================= */
+
 app.use((req, res) => {
   res.status(404).json({ success: false, error: "Route not found" });
 });
@@ -1031,8 +1049,9 @@ app.use((error, req, res, next) => {
 });
 
 /* =========================================================
-START
+STARTUP
 ========================================================= */
+
 async function load() {
   const data = handleSupabase(
     await supabase.from("stocks").select("*"),
@@ -1044,10 +1063,7 @@ async function load() {
 
     if (!validateStockName(stock)) continue;
 
-    STOCKS[stock] = {
-      price: clampPrice(row.price),
-      lastSaved: Number(row.last_saved || 0)
-    };
+    STOCKS[stock] = createStockState(row.price, row.last_saved);
   }
 
   return Object.keys(STOCKS).length;
@@ -1077,15 +1093,15 @@ async function shutdown(signal) {
   if (tickTimer) clearInterval(tickTimer);
   if (compressTimer) clearInterval(compressTimer);
 
-  if (server) {
-    server.close(() => {
-      process.exit(0);
-    });
-
-    setTimeout(() => process.exit(1), 10000).unref();
-  } else {
+  if (!server) {
     process.exit(0);
   }
+
+  server.close(() => {
+    process.exit(0);
+  });
+
+  setTimeout(() => process.exit(1), 10000).unref();
 }
 
 async function start() {
@@ -1098,8 +1114,8 @@ async function start() {
     compress
   );
 
-  server = app.listen(PORT, () => {
-    console.log(`server running on port ${PORT} (${loaded} stocks loaded)`);
+  server = app.listen(config.port, () => {
+    console.log(`server running on port ${config.port} (${loaded} stocks loaded)`);
   });
 }
 
@@ -1126,5 +1142,6 @@ module.exports = {
   calculatePrice,
   calculatePassiveMovement,
   getPassiveRandomnessMultiplier,
-  validateStockName
+  validateStockName,
+  clampPrice
 };
