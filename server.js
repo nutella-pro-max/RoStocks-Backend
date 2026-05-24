@@ -67,8 +67,10 @@ const STOCKS = Object.create(null);
 const QUEUES = Object.create(null);
 const STOCK_LOADS = Object.create(null);
 const ACCOUNT_CACHE = Object.create(null);
+const ACCOUNT_AGE_CACHE = Object.create(null);
 
 const MARKET_TICK_MINUTES = 5;
+const HISTORY_SAVE_INTERVAL_MINUTES = 5;
 const VOLATILITY = 25;
 
 const ONE_HOUR = 60 * 60 * 1000;
@@ -76,12 +78,24 @@ const ONE_DAY = 24 * ONE_HOUR;
 const ONE_WEEK = 7 * ONE_DAY;
 const ONE_MONTH = 30 * ONE_DAY;
 
+const COMPRESSION_RUN_INTERVAL_HOURS = 6;
+const COMPRESSION_FIRST_CHECK_AGE = ONE_HOUR;
+const COMPRESSION_FIRST_CHECK_INTERVAL = 15 * 60 * 1000;
+const COMPRESSION_SECOND_CHECK_AGE = ONE_DAY;
+const COMPRESSION_SECOND_CHECK_INTERVAL = 4 * ONE_HOUR;
+const COMPRESSION_THIRD_CHECK_AGE = ONE_WEEK;
+const COMPRESSION_THIRD_CHECK_INTERVAL = ONE_DAY;
+const COMPRESSION_FOURTH_CHECK_AGE = ONE_MONTH;
+const COMPRESSION_FOURTH_CHECK_INTERVAL = 5 * ONE_DAY;
+
 const MAX_SHARES_PER_TRADE = 5000;
 const MAX_STOCK_NAME_LENGTH = 32;
 const MAX_HISTORY_DELETE_BATCH = 500;
 const MAX_COLLECTIBLE_PAGES = 5;
 const ACCOUNT_CACHE_TTL = 5 * 60 * 1000;
 const ACCOUNT_CACHE_MAX_ITEMS = 500;
+const ACCOUNT_AGE_CACHE_TTL = ONE_DAY;
+const PASSIVE_RANDOMNESS_MIN = 0.2;
 
 let server;
 let tickTimer;
@@ -206,10 +220,22 @@ function clampPrice(price) {
 }
 
 function getRetentionInterval(age) {
-  if (age <= ONE_HOUR) return 0;
-  if (age <= ONE_DAY) return ONE_HOUR;
-  if (age <= ONE_WEEK) return 4 * ONE_HOUR;
-  if (age <= ONE_MONTH) return ONE_DAY;
+  if (age <= COMPRESSION_FIRST_CHECK_AGE) {
+    return COMPRESSION_FIRST_CHECK_INTERVAL;
+  }
+
+  if (age <= COMPRESSION_SECOND_CHECK_AGE) {
+    return COMPRESSION_SECOND_CHECK_INTERVAL;
+  }
+
+  if (age <= COMPRESSION_THIRD_CHECK_AGE) {
+    return COMPRESSION_THIRD_CHECK_INTERVAL;
+  }
+
+  if (age <= COMPRESSION_FOURTH_CHECK_AGE) {
+    return COMPRESSION_FOURTH_CHECK_INTERVAL;
+  }
+
   return null;
 }
 
@@ -221,6 +247,20 @@ function chunk(list, size) {
   }
 
   return chunks;
+}
+
+function getAccountAgeDaysFromCreated(created) {
+  const createdAt = new Date(created).getTime();
+
+  if (!Number.isFinite(createdAt)) return 0;
+
+  return Math.max(0, Math.floor((Date.now() - createdAt) / ONE_DAY));
+}
+
+function getPassiveRandomnessMultiplier(ageDays) {
+  const ageYears = Math.max(Number(ageDays) || 0, 0) / 365;
+
+  return Math.max(PASSIVE_RANDOMNESS_MIN, 1 / Math.sqrt(ageYears + 1));
 }
 
 /* =========================================================
@@ -315,23 +355,31 @@ async function getUserCounts(userId) {
   return { friends, followers, following };
 }
 
-function pruneAccountCache() {
-  const entries = Object.entries(ACCOUNT_CACHE);
+function pruneCache(cache, maxItems) {
+  const entries = Object.entries(cache);
   const now = Date.now();
 
   for (const [key, cached] of entries) {
     if (!cached || cached.expires <= now) {
-      delete ACCOUNT_CACHE[key];
+      delete cache[key];
     }
   }
 
-  const remaining = Object.entries(ACCOUNT_CACHE);
-  if (remaining.length <= ACCOUNT_CACHE_MAX_ITEMS) return;
+  const remaining = Object.entries(cache);
+  if (remaining.length <= maxItems) return;
 
   remaining
     .sort((a, b) => a[1].expires - b[1].expires)
-    .slice(0, remaining.length - ACCOUNT_CACHE_MAX_ITEMS)
-    .forEach(([key]) => delete ACCOUNT_CACHE[key]);
+    .slice(0, remaining.length - maxItems)
+    .forEach(([key]) => delete cache[key]);
+}
+
+function pruneAccountCache() {
+  pruneCache(ACCOUNT_CACHE, ACCOUNT_CACHE_MAX_ITEMS);
+}
+
+function pruneAccountAgeCache() {
+  pruneCache(ACCOUNT_AGE_CACHE, ACCOUNT_CACHE_MAX_ITEMS);
 }
 
 function collectibleValue(item) {
@@ -344,6 +392,32 @@ function collectibleValue(item) {
 
   const value = candidates.find((candidate) => Number(candidate) > 0);
   return Number(value || 10);
+}
+
+async function getAccountAgeDays(userId) {
+  if (!isId(userId)) return 0;
+
+  const cached = ACCOUNT_AGE_CACHE[userId];
+
+  if (cached && cached.expires > Date.now()) {
+    return cached.data;
+  }
+
+  try {
+    const user = await getRobloxUserById(userId);
+    const ageDays = getAccountAgeDaysFromCreated(user.created);
+
+    ACCOUNT_AGE_CACHE[userId] = {
+      data: ageDays,
+      expires: Date.now() + ACCOUNT_AGE_CACHE_TTL
+    };
+
+    pruneAccountAgeCache();
+    return ageDays;
+  } catch (error) {
+    console.warn(`account age unavailable for ${userId}:`, error.message);
+    return 0;
+  }
 }
 
 async function getAccountValue(userId) {
@@ -476,7 +550,7 @@ async function ensureStock(stock) {
 }
 
 /* =========================================================
-SAVE HISTORY (EVERY 10 MIN)
+SAVE HISTORY
 ========================================================= */
 async function saveHistory(stock, price) {
   const key = normalizeStockName(stock);
@@ -486,7 +560,7 @@ async function saveHistory(stock, price) {
   return enqueue(key, async () => {
     const now = Date.now();
 
-    if (now - STOCKS[key].lastSaved < 10 * 60 * 1000) {
+    if (now - STOCKS[key].lastSaved < HISTORY_SAVE_INTERVAL_MINUTES * 60000) {
       return false;
     }
 
@@ -532,7 +606,10 @@ PRICE CALC
 ========================================================= */
 function calculatePrice(oldPrice, shares, type, followers, value, age) {
   const safeOldPrice = clampPrice(oldPrice);
-  const safeShares = Math.min(Math.max(Number(shares) || 1, 1), MAX_SHARES_PER_TRADE);
+  const safeShares = Math.min(
+    Math.max(Number(shares) || 1, 1),
+    MAX_SHARES_PER_TRADE
+  );
   const safeFollowers = Math.max(Number(followers) || 0, 0);
   const safeValue = Math.max(Number(value) || 0, 0);
   const safeAge = Math.max(Number(age) || 0, 0);
@@ -554,12 +631,20 @@ function calculatePrice(oldPrice, shares, type, followers, value, age) {
   return clampPrice(price);
 }
 
+function calculatePassiveMovement(ageDays) {
+  const randomness = getPassiveRandomnessMultiplier(ageDays);
+
+  return (Math.random() - 0.5) * 2 * (VOLATILITY / 25) * randomness;
+}
+
 /* =========================================================
 MARKET TICK
 ========================================================= */
 async function tick() {
   const updates = Object.keys(STOCKS).map(async (stock) => {
-    const movement = (Math.random() - 0.5) * 2 * (VOLATILITY / 25);
+    const ageDays = await getAccountAgeDays(stock);
+    const movement = calculatePassiveMovement(ageDays);
+
     STOCKS[stock].price = clampPrice(STOCKS[stock].price + movement);
 
     await saveHistory(stock, STOCKS[stock].price);
@@ -779,10 +864,13 @@ app.post(
       getAccountValue(stock)
     ]);
 
-    const createdAt = new Date(user.created).getTime();
-    const age = Number.isFinite(createdAt)
-      ? Math.max(0, Math.floor((Date.now() - createdAt) / ONE_DAY))
-      : 0;
+    const age = getAccountAgeDaysFromCreated(user.created);
+
+    ACCOUNT_AGE_CACHE[stock] = {
+      data: age,
+      expires: Date.now() + ACCOUNT_AGE_CACHE_TTL
+    };
+    pruneAccountAgeCache();
 
     const old = STOCKS[stock].price;
     const newPrice = calculatePrice(
@@ -898,7 +986,11 @@ async function start() {
   const loaded = await load();
 
   tickTimer = scheduleTask("market tick", MARKET_TICK_MINUTES * 60000, tick);
-  compressTimer = scheduleTask("history compression", 6 * ONE_HOUR, compress);
+  compressTimer = scheduleTask(
+    "history compression",
+    COMPRESSION_RUN_INTERVAL_HOURS * ONE_HOUR,
+    compress
+  );
 
   server = app.listen(PORT, () => {
     console.log(`server running on port ${PORT} (${loaded} stocks loaded)`);
@@ -925,5 +1017,7 @@ module.exports = {
   tick,
   compress,
   calculatePrice,
+  calculatePassiveMovement,
+  getPassiveRandomnessMultiplier,
   validateStockName
 };
