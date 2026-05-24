@@ -69,22 +69,22 @@ const STOCK_LOADS = Object.create(null);
 const ACCOUNT_CACHE = Object.create(null);
 const ACCOUNT_AGE_CACHE = Object.create(null);
 
-const MARKET_TICK_MINUTES = 5;
-const HISTORY_SAVE_INTERVAL_MINUTES = 5;
 const VOLATILITY = 25;
 
-const ONE_HOUR = 60 * 60 * 1000;
-const ONE_DAY = 24 * ONE_HOUR;
-const ONE_WEEK = 7 * ONE_DAY;
-const ONE_MONTH = 30 * ONE_DAY;
+const MARKET_TICK_MINUTES = 2;
+const HISTORY_SAVE_INTERVAL_MINUTES = 10;
 
-const COMPRESSION_RUN_INTERVAL_HOURS = 6;
+const COMPRESSION_RUN_INTERVAL_HOURS = 1;
+
 const COMPRESSION_FIRST_CHECK_AGE = ONE_HOUR;
 const COMPRESSION_FIRST_CHECK_INTERVAL = 15 * 60 * 1000;
+
 const COMPRESSION_SECOND_CHECK_AGE = ONE_DAY;
 const COMPRESSION_SECOND_CHECK_INTERVAL = 4 * ONE_HOUR;
+
 const COMPRESSION_THIRD_CHECK_AGE = ONE_WEEK;
 const COMPRESSION_THIRD_CHECK_INTERVAL = ONE_DAY;
+
 const COMPRESSION_FOURTH_CHECK_AGE = ONE_MONTH;
 const COMPRESSION_FOURTH_CHECK_INTERVAL = 5 * ONE_DAY;
 
@@ -755,7 +755,18 @@ app.get(
       "read history"
     );
 
-    res.json({ success: true, stock, history });
+    const livePoint = {
+      stock,
+      price: STOCKS[stock].price,
+      timestamp: Date.now(),
+      live: true
+    };
+    
+    res.json({
+      success: true,
+      stock,
+      history: [...history, livePoint]
+    });
   })
 );
 
