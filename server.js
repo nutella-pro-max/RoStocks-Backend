@@ -22,6 +22,7 @@ const MOMENTUM = 0.8;
 
 const MARKET_TICK_MINUTES = 1;
 const HISTORY_SAVE_INTERVAL_MINUTES = 5;
+const ACTIVE_STOCK_TTL = ONE_DAY;
 
 const COMPRESSION_RUN_INTERVAL_HOURS = 1;
 
@@ -231,10 +232,15 @@ function normalizeTimestamp(value, fallback = 0) {
   return Math.max(0, Math.floor(timestamp));
 }
 
-function createStockState(price = DEFAULT_STOCK_PRICE, lastSaved = 0) {
+function createStockState(
+  price = DEFAULT_STOCK_PRICE,
+  lastSaved = 0,
+  lastTouched = Date.now()
+) {
   return {
     price: clampPrice(price),
-    lastSaved: normalizeTimestamp(lastSaved)
+    lastSaved: normalizeTimestamp(lastSaved),
+    lastTouched: normalizeTimestamp(lastTouched, Date.now())
   };
 }
 
@@ -321,6 +327,13 @@ function getPassiveRandomnessMultiplier(ageDays) {
   const ageYears = Math.max(Number(ageDays) || 0, 0) / 365;
 
   return Math.max(PASSIVE_RANDOMNESS_MIN, 1 / Math.sqrt(ageYears + 1));
+}
+
+function isStockActive(stock, now = Date.now()) {
+  const key = normalizeStockName(stock);
+  const lastTouched = normalizeTimestamp(STOCKS[key]?.lastTouched);
+
+  return now - lastTouched <= ACTIVE_STOCK_TTL;
 }
 
 /* =========================================================
@@ -558,6 +571,10 @@ async function ensureStock(stock) {
   if (STOCKS[key]) {
     STOCKS[key].price = clampPrice(STOCKS[key].price);
     STOCKS[key].lastSaved = normalizeTimestamp(STOCKS[key].lastSaved);
+    STOCKS[key].lastTouched = normalizeTimestamp(
+      STOCKS[key].lastTouched,
+      Date.now()
+    );
     return STOCKS[key];
   }
 
@@ -572,7 +589,11 @@ async function ensureStock(stock) {
       const data = rows?.[0];
 
       if (data) {
-        STOCKS[key] = createStockState(data.price, data.last_saved);
+        STOCKS[key] = createStockState(
+          data.price,
+          data.last_saved,
+          data.last_touched
+        );
         return STOCKS[key];
       }
 
@@ -583,7 +604,8 @@ async function ensureStock(stock) {
           {
             stock: key,
             price: STOCKS[key].price,
-            last_saved: STOCKS[key].lastSaved
+            last_saved: STOCKS[key].lastSaved,
+            last_touched: STOCKS[key].lastTouched
           },
           { onConflict: "stock" }
         ),
@@ -608,6 +630,18 @@ async function ensureStock(stock) {
   return STOCK_LOADS[key];
 }
 
+async function touchStock(stock) {
+  const key = normalizeStockName(stock);
+
+  await ensureStock(key);
+
+  STOCKS[key].lastTouched = Date.now();
+
+  await saveStock(key);
+
+  return STOCKS[key];
+}
+
 async function saveHistory(stock, price) {
   const key = normalizeStockName(stock);
 
@@ -618,6 +652,10 @@ async function saveHistory(stock, price) {
 
     STOCKS[key].price = clampPrice(STOCKS[key].price);
     STOCKS[key].lastSaved = normalizeTimestamp(STOCKS[key].lastSaved);
+    STOCKS[key].lastTouched = normalizeTimestamp(
+      STOCKS[key].lastTouched,
+      Date.now()
+    );
 
     if (now - STOCKS[key].lastSaved < HISTORY_SAVE_INTERVAL_MINUTES * 60000) {
       return false;
@@ -647,13 +685,18 @@ async function saveStock(stock) {
   return enqueue(key, async () => {
     STOCKS[key].price = clampPrice(STOCKS[key].price);
     STOCKS[key].lastSaved = normalizeTimestamp(STOCKS[key].lastSaved);
+    STOCKS[key].lastTouched = normalizeTimestamp(
+      STOCKS[key].lastTouched,
+      Date.now()
+    );
 
     handleSupabase(
       await supabase.from("stocks").upsert(
         {
           stock: key,
           price: STOCKS[key].price,
-          last_saved: STOCKS[key].lastSaved
+          last_saved: STOCKS[key].lastSaved,
+          last_touched: STOCKS[key].lastTouched
         },
         { onConflict: "stock" }
       ),
@@ -703,7 +746,13 @@ function calculatePassiveMovement(stock, ageDays) {
 }
 
 async function tick() {
+  const now = Date.now();
+
   const updates = Object.keys(STOCKS).map(async (stock) => {
+    if (!isStockActive(stock, now)) {
+      return;
+    }
+
     const ageDays = await getAccountAgeDays(stock);
     const movement = calculatePassiveMovement(stock, ageDays);
     const nextPrice = clampPrice(STOCKS[stock].price + movement);
@@ -828,7 +877,9 @@ app.get("/health", (req, res) => {
   res.json({
     success: true,
     uptime: process.uptime(),
-    trackedStocks: Object.keys(STOCKS).length
+    trackedStocks: Object.keys(STOCKS).length,
+    activeStocks: Object.keys(STOCKS).filter((stock) => isStockActive(stock))
+      .length
   });
 });
 
@@ -837,11 +888,16 @@ app.get(
   asyncRoute(async (req, res) => {
     const stock = normalizeStockName(req.params.stock);
 
-    await ensureStock(stock);
+    await touchStock(stock);
 
     STOCKS[stock].price = clampPrice(STOCKS[stock].price);
 
-    res.json({ success: true, stock, price: STOCKS[stock].price });
+    res.json({
+      success: true,
+      stock,
+      price: STOCKS[stock].price,
+      lastTouched: STOCKS[stock].lastTouched
+    });
   })
 );
 
@@ -850,7 +906,7 @@ app.get(
   asyncRoute(async (req, res) => {
     const stock = normalizeStockName(req.params.stock);
 
-    await ensureStock(stock);
+    await touchStock(stock);
 
     let compressed = false;
 
@@ -978,7 +1034,7 @@ app.post(
       throw new AppError(400, "stock must be userId");
     }
 
-    await ensureStock(stock);
+    await touchStock(stock);
 
     const [user, counts, account] = await Promise.all([
       getRobloxUserById(stock),
@@ -1005,6 +1061,7 @@ app.post(
     );
 
     STOCKS[stock].price = newPrice;
+    STOCKS[stock].lastTouched = Date.now();
 
     await saveHistory(stock, newPrice);
     await saveStock(stock);
@@ -1063,7 +1120,11 @@ async function load() {
 
     if (!validateStockName(stock)) continue;
 
-    STOCKS[stock] = createStockState(row.price, row.last_saved);
+    STOCKS[stock] = createStockState(
+      row.price,
+      row.last_saved,
+      row.last_touched
+    );
   }
 
   return Object.keys(STOCKS).length;
@@ -1143,5 +1204,6 @@ module.exports = {
   calculatePassiveMovement,
   getPassiveRandomnessMultiplier,
   validateStockName,
-  clampPrice
+  clampPrice,
+  isStockActive
 };
