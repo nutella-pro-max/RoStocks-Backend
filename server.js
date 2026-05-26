@@ -17,11 +17,11 @@ const ONE_DAY = 24 * ONE_HOUR;
 const ONE_WEEK = 7 * ONE_DAY;
 const ONE_MONTH = 30 * ONE_DAY;
 
-const VOLATILITY = 15;
-const MOMENTUM = 0.75;
+const VOLATILITY = 60;
+const MOMENTUM = 0.8;
 
-const MARKET_TICK_MINUTES = 2;
-const HISTORY_SAVE_INTERVAL_MINUTES = 10;
+const MARKET_TICK_MINUTES = 1;
+const HISTORY_SAVE_INTERVAL_MINUTES = 7.5;
 
 const COMPRESSION_RUN_INTERVAL_HOURS = 1;
 
@@ -45,7 +45,7 @@ const MAX_COLLECTIBLE_PAGES = 10;
 const ACCOUNT_CACHE_TTL = 5 * 60 * 1000;
 const ACCOUNT_CACHE_MAX_ITEMS = 1000;
 const ACCOUNT_AGE_CACHE_TTL = ONE_DAY;
-const PASSIVE_RANDOMNESS_MIN = 0.25;
+const PASSIVE_RANDOMNESS_MIN = 0.4;
 
 function readPositiveIntegerEnv(name, fallback, max = Number.MAX_SAFE_INTEGER) {
   const raw = process.env[name];
