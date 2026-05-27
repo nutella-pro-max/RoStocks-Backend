@@ -4,6 +4,7 @@ const express = require("express");
 const axios = require("axios");
 const rateLimit = require("express-rate-limit");
 const { createClient } = require("@supabase/supabase-js");
+const crypto = require("crypto");
 
 /* =========================================================
 CONFIG
@@ -212,6 +213,34 @@ function handleSupabase(result, action) {
 /* =========================================================
 UTILITIES
 ========================================================= */
+
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a || ""), "utf8");
+  const right = Buffer.from(String(b || ""), "utf8");
+
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function requireTradeApiKey(req, res, next) {
+  const expectedKey = process.env.TRADE_API_KEY;
+  const providedKey = req.get("x-api-key");
+
+  if (!expectedKey) {
+    return res.status(500).json({
+      success: false,
+      error: "Trade API key is not configured"
+    });
+  }
+
+  if (!providedKey || !safeEqual(providedKey, expectedKey)) {
+    return res.status(401).json({
+      success: false,
+      error: "Unauthorized"
+    });
+  }
+
+  next();
+}
 
 const isId = (value) => /^\d+$/.test(String(value ?? "").trim());
 
@@ -1025,6 +1054,7 @@ app.get(
 
 app.post(
   "/trade",
+  requireTradeApiKey,
   asyncRoute(async (req, res) => {
     const stock = normalizeStockName(req.body.stock);
     const shares = parseShares(req.body.shares);
