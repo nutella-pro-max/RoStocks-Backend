@@ -980,7 +980,7 @@ app.get(
 );
 
 app.get(
-  ["/user/id/:userId", "/player/id/:userId"],
+  "/userId/:userId",
   asyncRoute(async (req, res) => {
     const userId = String(req.params.userId ?? "").trim();
 
@@ -994,7 +994,7 @@ app.get(
 );
 
 app.get(
-  ["/user/name/:username", "/player/name/:username"],
+ "/username/:username",
   asyncRoute(async (req, res) => {
     const userId = await resolveUsername(req.params.username);
     const data = await getFullUserData(userId);
@@ -1004,7 +1004,7 @@ app.get(
 );
 
 app.get(
-  ["/game/:value", "/experience/:value"],
+  "/experience/:value",
   asyncRoute(async (req, res) => {
     const value = String(req.params.value ?? "").trim();
 
