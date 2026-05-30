@@ -57,7 +57,7 @@ function readPositiveIntegerEnv(name, fallback, max = Number.MAX_SAFE_INTEGER) {
     throw new Error(`${name} must be an integer between 1 and ${max}`);
   }
 
-  return value;
+  return normalized;
 }
 
 function requireEnv(name) {
@@ -78,7 +78,7 @@ function readTrustProxyEnv(value) {
   if (normalized === "true") return true;
   if (normalized === "false") return false;
 
-  const numericValue = Number(value);
+  const numericValue = Number(normalized);
   if (Number.isInteger(numericValue) && numericValue >= 0) return numericValue;
 
   return value;
@@ -214,11 +214,15 @@ function handleSupabase(result, action) {
 UTILITIES
 ========================================================= */
 
-function safeEqual(a, b) {
-  const left = Buffer.from(String(a || ""), "utf8");
-  const right = Buffer.from(String(b || ""), "utf8");
+function hashForCompare(value) {
+  return crypto
+    .createHash("sha256")
+    .update(String(value ?? ""), "utf8")
+    .digest();
+}
 
-  return left.length === right.length && crypto.timingSafeEqual(left, right);
+function safeEqual(a, b) {
+  return crypto.timingSafeEqual(hashForCompare(a), hashForCompare(b));
 }
 
 function requireTradeApiKey(req, res, next) {
@@ -632,7 +636,8 @@ async function ensureStock(stock) {
         return STOCKS[key];
       }
 
-      STOCKS[key] = createStockState();
+      const now = Date.now();
+      STOCKS[key] = createStockState(DEFAULT_STOCK_PRICE, now, now);
 
       handleSupabase(
         await supabase.from("stocks").upsert(
@@ -651,7 +656,7 @@ async function ensureStock(stock) {
         await supabase.from("stock_history").insert({
           stock: key,
           price: STOCKS[key].price,
-          timestamp: Date.now()
+          timestamp: now
         }),
         "insert stock history"
       );
@@ -844,6 +849,8 @@ function getCompressedHistoryDeletions(history, now = Date.now()) {
 }
 
 async function deleteHistoryRows(ids) {
+  if (!ids.length) return;
+
   for (const batch of chunk(ids, MAX_HISTORY_DELETE_BATCH)) {
     handleSupabase(
       await supabase.from("stock_history").delete().in("id", batch),
@@ -994,7 +1001,7 @@ app.get(
 );
 
 app.get(
- "/username/:username",
+  "/username/:username",
   asyncRoute(async (req, res) => {
     const userId = await resolveUsername(req.params.username);
     const data = await getFullUserData(userId);
@@ -1112,8 +1119,7 @@ app.post(
     await saveHistory(stock, newPrice);
     await saveStock(stock);
 
-    res.json({
-      success: true,
+    const tradeResult = {
       stock,
       type,
       shares,
@@ -1123,6 +1129,12 @@ app.post(
       user,
       counts,
       account
+    };
+
+    res.json({
+      success: true,
+      ...tradeResult,
+      data: tradeResult
     });
   })
 );
@@ -1136,7 +1148,11 @@ app.use((req, res) => {
 });
 
 app.use((error, req, res, next) => {
-  const status = Number(error.status || 500);
+  const requestedStatus = Number(error.status);
+  const status =
+    Number.isInteger(requestedStatus) && requestedStatus >= 400 && requestedStatus <= 599
+      ? requestedStatus
+      : 500;
 
   if (status >= 500) {
     console.error(error);
