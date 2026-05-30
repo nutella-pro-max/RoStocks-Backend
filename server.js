@@ -404,15 +404,11 @@ async function getRobloxUserById(userId) {
   return user.data;
 }
 
-async function resolveUserId(value) {
-  const normalized = String(value ?? "").trim();
+async function resolveUsername(username) {
+  const normalized = String(username ?? "").trim();
 
   if (!normalized) {
-    throw new AppError(400, "user value is required");
-  }
-
-  if (isId(normalized)) {
-    return normalized;
+    throw new AppError(400, "username is required");
   }
 
   const response = await http.post(
@@ -430,6 +426,16 @@ async function resolveUserId(value) {
   }
 
   return String(userId);
+}
+
+async function getFullUserData(userId) {
+  const [user, counts, account] = await Promise.all([
+    getRobloxUserById(userId),
+    getUserCounts(userId),
+    getAccountValue(userId)
+  ]);
+
+  return { user, counts, account };
 }
 
 async function getCount(path) {
@@ -974,16 +980,26 @@ app.get(
 );
 
 app.get(
-  ["/user/:value", "/player/:value"],
+  ["/user/id/:userId", "/player/id/:userId"],
   asyncRoute(async (req, res) => {
-    const userId = await resolveUserId(req.params.value);
-    const [user, counts, account] = await Promise.all([
-      getRobloxUserById(userId),
-      getUserCounts(userId),
-      getAccountValue(userId)
-    ]);
+    const userId = String(req.params.userId ?? "").trim();
 
-    res.json({ success: true, user, counts, account });
+    if (!isId(userId)) {
+      throw new AppError(400, "userId must be numeric");
+    }
+
+    const data = await getFullUserData(userId);
+    res.json({ success: true, ...data });
+  })
+);
+
+app.get(
+  ["/user/name/:username", "/player/name/:username"],
+  asyncRoute(async (req, res) => {
+    const userId = await resolveUsername(req.params.username);
+    const data = await getFullUserData(userId);
+
+    res.json({ success: true, ...data });
   })
 );
 
