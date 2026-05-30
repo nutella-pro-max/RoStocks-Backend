@@ -57,7 +57,7 @@ function readPositiveIntegerEnv(name, fallback, max = Number.MAX_SAFE_INTEGER) {
     throw new Error(`${name} must be an integer between 1 and ${max}`);
   }
 
-  return normalized;
+  return value;
 }
 
 function requireEnv(name) {
